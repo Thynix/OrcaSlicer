@@ -93,8 +93,8 @@ Explore the latest developments in OrcaSlicer with our nightly builds. Feedback 
 
 The [nightly release](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/nightly-builds) ships **two parallel builds**: the standard build and a belt-printer build. Both are attached to the same release — tell them apart by the filename suffix:
 
-- **Standard** — no suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly.exe`)
-- **Belt** — `_belt` suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly_belt.exe`)
+- **Standard** — no suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly.msi`)
+- **Belt** — `_belt` suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly_belt.msi`)
 
 The `_belt` builds add **experimental support for belt / conveyor (infinite-Z) printers**, where the model is sliced against a tilted belt surface instead of a flat horizontal bed. They include ready-to-use belt printer profiles, the full belt slicing pipeline (mesh rotation and G-code transforms), belt-aware support generation, and a tilted-bed preview.
 
@@ -104,7 +104,7 @@ The `_belt` builds add **experimental support for belt / conveyor (infinite-Z) p
 
 ## Windows
 
-Download the **Windows Installer exe** for your preferred version from the [releases page](https://github.com/OrcaSlicer/OrcaSlicer/releases). Both `x64` and `arm64` installers are published — pick the one matching your CPU.
+Download the **Windows Installer msi** for your preferred version from the [releases page](https://github.com/OrcaSlicer/OrcaSlicer/releases). Both `x64` and `arm64` installers are published — pick the one matching your CPU.
 
 - *For convenience there is also a portable build available.*
     <details>

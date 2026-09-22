@@ -92,11 +92,11 @@ jobs:
           # binaries are already unzipped. Copy the inner binary for each platform.
           # -type f is required (some artifact *folders* are named "*.flatpak").
 
-          # Windows installers (x64 + arm64): the .exe inside each installer
+          # Windows installers (x64 + arm64): the .msi inside each installer
           # artifact, NOT the orca-slicer.exe in the portable app folder. CPack
-          # now bakes the arch into the filename (…_x64.exe / …_arm64.exe), so
+          # now bakes the arch into the filename (…_x64.msi / …_arm64.msi), so
           # copy them straight through.
-          find artifacts -type f -name '*.exe' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
+          find artifacts -type f -name '*.msi' -path '*OrcaSlicer_Windows_V*' ! -path '*_portable*' -exec cp -v {} upload/ \;
           # macOS universal DMG (profile-validator DMG isn't downloaded).
           find artifacts -type f -name '*.dmg' -path '*OrcaSlicer_Mac_universal_*' -exec cp -v {} upload/ \;
           # Linux AppImage.

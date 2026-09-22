@@ -4,6 +4,14 @@ endif()
 
 cmake_minimum_required(VERSION 3.13)
 
+# CPack's WiX generator only gained CPACK_WIX_INSTALL_SCOPE=perUser support in
+# CMake 4.3 (used below to build a non-elevated Windows installer). Require it
+# only on Windows so Linux/macOS builds aren't forced onto a CMake release
+# that's too new to be packaged for stable distros.
+if (CMAKE_HOST_WIN32)
+    cmake_minimum_required(VERSION 4.3)
+endif ()
+
 if(POLICY CMP0177)
     cmake_policy(SET CMP0177 NEW)
 endif()
@@ -1320,18 +1328,16 @@ set (CPACK_PACKAGE_DESCRIPTION_SUMMARY "Orca Slicer is an open source slicer for
 set (CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/OrcaSlicer/OrcaSlicer")
 set (CPACK_PACKAGE_INSTALL_DIRECTORY ${CPACK_PACKAGE_NAME})
 set (CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}/resources/images\\\\OrcaSlicer.ico")
-set (CPACK_NSIS_MUI_ICON "${CPACK_PACKAGE_ICON}")
-set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
-set (CPACK_NSIS_INSTALLED_ICON_NAME  "$INSTDIR\\\\orca-slicer.exe")
 set (CPACK_PACKAGE_CHECKSUM SHA256)
 set (CPACK_PACKAGE_INSTALL_REGISTRY_KEY "OrcaSlicer")
-set (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
-set (CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
-# set (CPACK_NSIS_MODIFY_PATH "ON")
 set(CPACK_PACKAGE_EXECUTABLES "orca-slicer;OrcaSlicer")
-set(CPACK_CREATE_DESKTOP_LINKS "orca-slicer")
 set (CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.txt) # must also include in install command
 
 set(CPACK_WIX_UPGRADE_GUID "058245e8-20e0-4a95-9ab7-1acfe17ad511")
-set(CPACK_GENERATOR NSIS)
+set(CPACK_WIX_VERSION 4)
+set(CPACK_WIX_INSTALL_SCOPE "perUser")
+set(CPACK_WIX_EXTENSIONS "WixToolset.UI.wixext")
+set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/resources/images/OrcaSlicer.ico")
+set(CPACK_WIX_PATCH_FILE "${CMAKE_SOURCE_DIR}/resources/wix/desktop_shortcut.wxs.patch")
+set(CPACK_GENERATOR WIX)
 include(CPack)

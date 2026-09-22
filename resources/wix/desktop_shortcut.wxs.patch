@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  UNVERIFIED: the target CPackWiXFragment Id below follows CPack's usual
+  per-file component naming convention, but component IDs are content-addressed
+  by CPack and this project has never built with CPACK_WIX_VERSION 4 before.
+  Confirm the real Id (and the WiX v4 schema namespace, if CPack's patch schema
+  turns out to require one) by inspecting the generated .wxs under
+  <build-dir>/_CPack_Packages/win64/WIX/ on the first Windows build, and update
+  this file if it differs.
+-->
+<CPackWiXPatch>
+  <CPackWiXFragment Id="CM_CP_bin.orca-slicer.exe">
+    <Shortcut Id="DesktopShortcut"
+              Directory="DesktopFolder"
+              Name="OrcaSlicer"
+              WorkingDirectory="INSTALLFOLDER"
+              Icon="ProductIcon.ico"
+              IconIndex="0"
+              Advertise="yes" />
+  </CPackWiXFragment>
+</CPackWiXPatch>

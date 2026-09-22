@@ -446,28 +446,25 @@ jobs:
         if: runner.os == 'Windows'
         uses: microsoft/setup-msbuild@v3
 
-      - name: Install nsis
+      - name: Install WiX Toolset
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
         shell: pwsh
-        # The Chocolatey community feed intermittently 504s, and `choco install`
-        # exits 0 when package resolution fails that way. Unchecked, the job then
-        # builds for ~25 minutes before `cpack -G NSIS` reports a missing makensis.
-        # Retry the install and verify makensis itself, so a real failure stops here.
         run: |
           dir "C:/Program Files (x86)/Windows Kits/10/Include"
-          $nsisDir = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
-          $makensis = Join-Path $nsisDir 'makensis.exe'
-          for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
+          $toolsDir = Join-Path $env:USERPROFILE '.dotnet\tools'
+          $wix = Join-Path $toolsDir 'wix.exe'
+          for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $wix); $attempt++) {
             if ($attempt -gt 1) { Start-Sleep -Seconds (15 * $attempt) }
-            Write-Host "::group::choco install nsis (attempt $attempt)"
-            choco install nsis --yes --no-progress
+            Write-Host "::group::dotnet tool install wix (attempt $attempt)"
+            dotnet tool install --global wix --version 7.0.0
             Write-Host "::endgroup::"
           }
-          if (-not (Test-Path $makensis)) {
-            throw "NSIS install failed: $makensis not found after 3 attempts."
+          if (-not (Test-Path $wix)) {
+            throw "WiX install failed: $wix not found after 3 attempts."
           }
-          & $makensis /VERSION
-          $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          & $wix --version
+          wix extension add --global WixToolset.UI.wixext/7.0.0
+          $toolsDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
 
       - name: Build slicer Win
         if: runner.os == 'Windows'
@@ -489,7 +486,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         # Shipped into both the already-installed tree (portable zip, MSIX) and
-        # the checkout cpack re-installs from when it builds the NSIS installer.
+        # the checkout cpack re-installs from when it builds the WiX installer.
         run: scripts\build_preset_cache.bat --prune-source "%BUILD_DIR%" "resources\profiles" "%BUILD_DIR%\OrcaSlicer\resources\profiles"
 
       - name: Pack unit tests Win
@@ -508,13 +505,11 @@ jobs:
           retention-days: 5
           if-no-files-found: error
 
-      # NSIS is x86-only; it runs (and the installer it emits runs) under ARM64's
-      # x86 emulation, packaging the native arm64 payload from build-arm64.
       - name: Create installer Win
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
         working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}
         run: |
-          cpack -G NSIS
+          cpack -G WIX
 
       - name: Pack app
         if: runner.os == 'Windows'
@@ -540,7 +535,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: OrcaSlicer_Windows_${{ env.ver }}${{ env.ARCH_SUFFIX }}
-          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer*.exe
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer*.msi
 
       - name: Upload artifacts Win PDB
         if: runner.os == 'Windows' && inputs.arch != 'arm64' && !vars.SELF_HOSTED
@@ -573,9 +568,9 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/OrcaSlicer/OrcaSlicer/releases/137995723/assets{?name,label}
           release_id: 137995723
-          asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_Installer_${{ env.ver }}${{ env.ARCH_SUFFIX }}.exe
-          asset_name: OrcaSlicer_Windows_Installer${{ env.ARCH_SUFFIX }}_nightly${{ env.nightly_suffix }}.exe
-          asset_content_type: application/x-msdownload
+          asset_path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer_Windows_Installer_${{ env.ver }}${{ env.ARCH_SUFFIX }}.msi
+          asset_name: OrcaSlicer_Windows_Installer${{ env.ARCH_SUFFIX }}_nightly${{ env.nightly_suffix }}.msi
+          asset_content_type: application/x-msi
           max_releases: 1
 
       - name: Deploy Windows OrcaSlicer_profile_validator release

@@ -11,4 +11,4 @@ jobs:
           identifier: SoftFever.OrcaSlicer
           version: ${{ github.event.release.tag_name }}
           token: ${{ secrets.WINGET_TOKEN }}
-          installers-regex: '\.exe$'
+          installers-regex: '\.msi$'

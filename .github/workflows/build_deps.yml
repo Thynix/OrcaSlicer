@@ -73,8 +73,8 @@ jobs:
             if (-not "${{ vars.SELF_HOSTED }}") {
               choco install strawberryperl
             }
-            .\build_release_vs.bat deps
-            .\build_release_vs.bat pack
+            .\build_win.bat -d
+            .\build_win.bat -p
         shell: pwsh
 
       - name: Build on Mac ${{ inputs.arch }}

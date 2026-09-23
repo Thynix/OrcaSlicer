@@ -61,7 +61,7 @@ call :add_arg use_ninja bool x ninja "Use the Ninja Multi-Config generator"
 call :add_arg use_msbuild bool "" msbuild "Use the Visual Studio generator (default)"
 call :add_arg vs_version string "" vs "Visual Studio release: 2019, 2022 or 2026 (default: autodetect)"
 call :add_arg clang_path string "" clang-path "Path to clang-cl.exe, requires -x (default: the one from Visual Studio)"
-call :add_arg cache string "" cache "Compiler cache: ccache, sccache or off, requires -l -x (default: off)"
+call :add_arg cache string "" cache "Compiler cache: ccache (needs -l -x), sccache (needs -x) or off (default: off)"
 
 call :add_section "How much gets rebuilt"
 call :add_arg slicer_target string "" slicer-target "Build one slicer target instead of all, e.g. libslic3r"
@@ -394,6 +394,7 @@ if not "%clang_path%" == "" if not "%using_ninja%" == "ON" (
 )
 
 set "cache_args="
+set "cache_slicer_args="
 if "%cache%" == "" goto :cache_ready
 if /I "%cache%" == "off" goto :cache_ready
 if /I "%cache%" == "ccache" goto :cache_named
@@ -403,17 +404,20 @@ exit /b 1
 
 REM CMake accepts a compiler launcher under any generator but only runs it
 REM under Makefile and Ninja. ccache also refuses cl.exe because the build
-REM passes /Zi.
+REM passes /Zi. sccache handles cl.exe once the debug info moves into the
+REM objects with /Z7, which it does below.
 :cache_named
 REM Only a configure records the launcher, so --no-configure needs none.
 if "%no_configure%" == "ON" goto :cache_ready
 if "%build_deps%%build_slicer%" == "" goto :cache_ready
-if not "%using_ninja%" == "ON" goto :cache_needs_clang
-if not "%use_clang_cl%" == "ON" goto :cache_needs_clang
-goto :cache_tool
+if not "%using_ninja%" == "ON" goto :cache_needs_ninja
+if "%use_clang_cl%" == "ON" goto :cache_tool
+if /I "%cache%" == "sccache" goto :cache_tool
+echo --cache ccache needs clang-cl; add -l, or use sccache.
+exit /b 1
 
-:cache_needs_clang
-echo --cache needs clang-cl and Ninja; add -l -x.
+:cache_needs_ninja
+echo --cache needs Ninja; add -x.
 exit /b 1
 
 REM Name a full path, so the recorded launcher does not depend on PATH.
@@ -433,6 +437,20 @@ REM Neither cache stores a compile that uses a precompiled header. sccache
 REM refuses /Fp outright. ccache does too unless its sloppiness is loosened,
 REM and even then most hits fall back to the slower preprocessed mode.
 set "no_pch=ON"
+REM sccache cannot store a cl.exe compile with /Zi, which writes to a PDB
+REM shared across objects. Embedded debug info swaps it for /Z7: CMP0141
+REM moves CMake's own per-config /Zi under that setting (CMake 3.25+), and
+REM the top-level CMakeLists follows it for the /Zi it adds itself. Slicer
+REM only: the deps superbuild forwards its RelWithDebInfo flags as the
+REM sub-builds' release flags, and dropping /Zi there drops their debug info.
+REM So only release deps are cached; a /Zi compile still builds, uncached.
+REM
+REM Relative debug paths let another tree reuse the objects, clang-cl only.
+if "%use_clang_cl%" == "ON" (
+    set "cache_slicer_args=-DSLIC3R_RELATIVE_DEBUG_PATHS=ON"
+) else (
+    set "cache_slicer_args=-DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded"
+)
 
 :cache_ready
 
@@ -699,8 +717,7 @@ if "%build_slicer%" == "ON" (
     )
 
     if not "!cache_args!" == "" (
-        REM Relative debug paths as well, so another tree can reuse the objects.
-        set "slicer_args=!slicer_args! !cache_args! -DSLIC3R_RELATIVE_DEBUG_PATHS=ON"
+        set "slicer_args=!slicer_args! !cache_args! !cache_slicer_args!"
     )
 
     REM Configuring against a tree that was never built fails deep inside
@@ -933,6 +950,7 @@ REM get_str_len <string> -> length in %ret%
     echo    %script_name% -s --slicer-target glad   Compile one target to check the toolchain
     echo    %script_name% -l -x --run-tests         Test that toolchain's build, not the default one
     echo    %script_name% -s -l -x --cache ccache   Rebuild through a compiler cache
+    echo    %script_name% -s -x --cache sccache     Rebuild with cl through sccache
     echo.
     echo Environment:
     echo    ORCA_DEPS_CMAKE_ARGS      Extra arguments for the deps configure

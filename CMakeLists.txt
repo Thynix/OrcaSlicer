@@ -367,8 +367,14 @@ if (MSVC)
     # Generate symbols at every build target, even for the release.
 	# -Zm520 fixes error C3859 but forces the compiler to pre-allocate that memory for every translation unit regardless
 	# combining /Zi with /FS frees up a significant amount of memory pressure across all parallel compile jobs and makes /MP faster overall.
+    # A compiler cache cannot store a /Zi compile, whose debug info goes to a PDB
+    # shared across objects. Asking for Embedded debug info asks for /Z7 here too.
     if (SLIC3R_MSVC_PDB)
-        add_compile_options(/Zi /FS)
+        if (CMAKE_MSVC_DEBUG_INFORMATION_FORMAT STREQUAL "Embedded")
+            add_compile_options(/Z7)
+        else ()
+            add_compile_options(/Zi /FS)
+        endif ()
     endif ()
     # Disable STL4007: Many result_type typedefs and all argument_type, first_argument_type, and second_argument_type typedefs are deprecated in C++17.
     #FIXME Remove this line after eigen library adapts to the new C++17 adaptor rules.

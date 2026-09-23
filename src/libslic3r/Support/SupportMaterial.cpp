@@ -10,6 +10,7 @@
 #include "MutablePolygon.hpp"
 
 #include <cmath>
+#include <numeric>
 #include <memory>
 #include <boost/log/trivial.hpp>
 #include <boost/container/static_vector.hpp>

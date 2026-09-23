@@ -876,7 +876,15 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
                @ONLY)
 
 if (WIN32)
-    add_library(libslic3r_gui STATIC
+    # With /Z7 each object carries its own copy of the debug info, and the
+    # archive outgrows the 4 GB a .lib can hold (LNK1248). Linking the objects
+    # directly lets the linker merge them into the PDB instead.
+    if (CMAKE_MSVC_DEBUG_INFORMATION_FORMAT STREQUAL "Embedded")
+        set(_gui_lib_type OBJECT)
+    else ()
+        set(_gui_lib_type STATIC)
+    endif ()
+    add_library(libslic3r_gui ${_gui_lib_type}
         ${SLIC3R_GUI_SOURCES}
         ../dev-utils/BaseException.cpp
         ../dev-utils/BaseException.h

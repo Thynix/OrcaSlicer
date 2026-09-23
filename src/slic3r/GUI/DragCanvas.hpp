@@ -5,6 +5,9 @@
 #include "wx/dragimag.h"
 #include "wx/panel.h"
 
+#include <string>
+#include <vector>
+
 namespace Slic3r { namespace GUI {
 
 class DragShape : public wxObject

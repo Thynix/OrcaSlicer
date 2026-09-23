@@ -1,4 +1,5 @@
 #include "ArrangeJob.hpp"
+#include <numeric>
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/SVG.hpp"

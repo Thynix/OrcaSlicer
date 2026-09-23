@@ -25,6 +25,7 @@
 #include "I18N.hpp"
 
 #include <cassert>
+#include <numeric>
 #include <chrono>
 #include <optional>
 #include <stdio.h>

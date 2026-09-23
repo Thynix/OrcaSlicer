@@ -1,5 +1,11 @@
 #ifndef slic3r_Format_STEP_hpp_
 #define slic3r_Format_STEP_hpp_
+// Must precede OCCT. On Windows, OCCT's Standard_Macro.hxx defines NONLS
+// before including <windows.h>, so winnls.h is skipped. Boost.Regex included
+// afterwards expects windows.h to have declared LCTYPE, LCMapString etc. and
+// fails; included first, it declares them itself. libslic3r's pchheader.hpp
+// already includes Boost.Regex first, so only non-PCH builds need this.
+#include <boost/regex.hpp>
 #include "XCAFDoc_DocumentTool.hxx"
 #include "XCAFApp_Application.hxx"
 #include "XCAFDoc_ShapeTool.hxx"

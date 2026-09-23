@@ -2,6 +2,7 @@
 #include "GCode/ToolOrderUtils.hpp"
 #include "FlushVolPredictor.hpp"
 #include <queue>
+#include <numeric>
 #include <random>
 #include <cassert>
 #include <sstream>

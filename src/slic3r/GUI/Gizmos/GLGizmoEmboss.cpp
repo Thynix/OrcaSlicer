@@ -301,11 +301,15 @@ struct GuiCfg
     Translations translations;
 };
 GuiCfg create_gui_configuration();
+// wxFont of the style on this OS, or a similar one when the style comes from another OS or its font is not installed
+wxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name, bool &is_exact_font);
 
 void draw_font_preview(FaceName &face, const std::string &text, Facenames &faces, const GuiCfg &cfg, bool is_visible);
 // for existing volume which is selected(could init different(to volume text) lines count when edit text)
 void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* const*/ StyleManager &style_manager, unsigned count_lines=0);
-} // namespace priv
+// for text volume with transformation inside of its object, which need not be in the scene
+void init_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, /* const*/ StyleManager &style_manager, unsigned count_lines=0);
+} // namespace
 
 // use private definition
 struct GLGizmoEmboss::Facenames: public ::Facenames{};
@@ -387,6 +391,62 @@ bool GLGizmoEmboss::re_emboss(const ModelVolume &text_volume, std::shared_ptr<st
 
     RaycastManager raycast_manager; // Nothing is cached now, so It need to create raycasters
     return start_update_volume(std::move(data), text_volume, selection, raycast_manager);
+}
+
+bool GLGizmoEmboss::rebuild_text_mesh(ModelVolume &text_volume, bool *is_exact_font)
+{
+    assert(text_volume.text_configuration.has_value());
+    assert(text_volume.emboss_shape.has_value());
+    if (!text_volume.text_configuration.has_value() ||
+        !text_volume.emboss_shape.has_value())
+        return false; // not valid text volume to rebuild
+    const TextConfiguration &tc = *text_volume.text_configuration;
+    const EmbossShape       &es = *text_volume.emboss_shape;
+    const Transform3d       &tr = text_volume.get_matrix(); // the text frame, see the .3mf importer
+
+    TriangleMesh mesh;
+    StyleManager style_manager(ImGui::GetIO().Fonts->GetGlyphRangesDefault(), create_default_styles);
+    const StyleManager::Style style{tc.style, es.projection};
+    bool is_exact = true;
+    bool is_loaded;
+    if (style.type == EmbossStyle::Type::file_path) {
+        is_loaded = style_manager.load_style(style);
+    } else {
+        // Same fallback as the gizmo, e.g. for a font from another OS.
+        // wxFontEnumerator caches the face names, unlike get_installed_face_name() which enumerates them on each call.
+        std::optional<wxString> installed_name;
+        if (!style.prop.face_name.has_value())
+            installed_name = wxString();
+        else if (wxString name = wxString::FromUTF8(*style.prop.face_name); wxFontEnumerator::IsValidFacename(name))
+            installed_name = name;
+        is_loaded = style_manager.load_style(style, load_wx_font(style, installed_name, is_exact));
+    }
+    if (is_exact_font != nullptr)
+        *is_exact_font = is_exact;
+    if (is_loaded) {
+        DataBase base(text_volume.name, std::make_shared<std::atomic<bool>>(false));
+        base.is_outside   = text_volume.type() == ModelVolumeType::MODEL_PART;
+        if (tc.style.prop.per_glyph) {
+            TextLinesModel text_lines;
+            init_text_lines(text_lines, text_volume, tr, style_manager);
+            base.text_lines = text_lines.get_lines();
+        }
+        TextDataBase data(std::move(base), style_manager.get_font_file_with_cache(), TextConfiguration(tc), es.projection);
+        mesh = create_mesh_blocking(data, text_volume, tr);
+        if (!mesh.empty())
+            data.write(text_volume); // also clears the fix matrix
+    } else
+        BOOST_LOG_TRIVIAL(warning) << "Can't load font for text volume \"" << text_volume.name << "\"";
+
+    const bool is_rebuilt = !mesh.empty();
+    if (!is_rebuilt) {
+        // Same placeholder as the gizmo uses when text has no shape
+        mesh = create_default_mesh();
+        text_volume.emboss_shape->fix_3mf_tr.reset();
+    }
+    text_volume.set_mesh(std::move(mesh));
+    text_volume.calculate_convex_hull();
+    return is_rebuilt;
 }
 
 namespace{
@@ -1100,6 +1160,32 @@ std::optional<wxString> get_installed_face_name(const std::optional<std::string>
     return {}; // not installed    
 }
 
+/// <param name="installed_name">Face name of the style when it is installed, see get_installed_face_name()</param>
+wxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name, bool &is_exact_font)
+{
+    wxFont wx_font;
+    // load wxFont from same OS when font name is installed
+    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
+        wx_font = WxFontUtils::load_wxFont(style.path);
+
+    // Flag that is selected same font
+    is_exact_font = true;
+    // Different OS or try found on same OS
+    if (!wx_font.IsOk()) {
+        is_exact_font = false;
+        // Try create similar wx font by FontFamily
+        wx_font = WxFontUtils::create_wxFont(style);
+        if (installed_name.has_value() && !installed_name->empty())
+            is_exact_font = wx_font.SetFaceName(*installed_name);
+
+        // Have to use some wxFont
+        if (!wx_font.IsOk())
+            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    }
+    assert(wx_font.IsOk());
+    return wx_font;
+}
+
 void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* const*/ StyleManager &style_manager, unsigned count_lines)
 {    
     const GLVolume *gl_volume_ptr = selection.get_first_volume();
@@ -1111,13 +1197,23 @@ void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* 
     if (mv_ptr == nullptr)
         return;
     const ModelVolume &mv = *mv_ptr;
-    if (mv.is_the_only_one_part())
-        return;
 
     const std::optional<EmbossShape> &es_opt = mv.emboss_shape;
     if (!es_opt.has_value())
         return;
     const EmbossShape &es = *es_opt;
+
+    // For interactivity during drag over surface it must be from gl_volume not volume.
+    Transform3d mv_trafo = gl_volume.get_volume_transformation().get_matrix();
+    if (es.fix_3mf_tr.has_value())
+        mv_trafo = mv_trafo * (es.fix_3mf_tr->inverse());
+    init_text_lines(text_lines, mv, mv_trafo, style_manager, count_lines);
+}
+
+void init_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, /* const*/ StyleManager &style_manager, unsigned count_lines)
+{
+    if (mv.is_the_only_one_part())
+        return;
 
     const std::optional<TextConfiguration> &tc_opt = mv.text_configuration;
     if (!tc_opt.has_value())
@@ -1133,12 +1229,7 @@ void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* 
 
     // prepare volumes to slice
     ModelVolumePtrs volumes = prepare_volumes_to_slice(mv);
-
-    // For interactivity during drag over surface it must be from gl_volume not volume.
-    Transform3d mv_trafo = gl_volume.get_volume_transformation().get_matrix();
-    if (es.fix_3mf_tr.has_value())
-        mv_trafo = mv_trafo * (es.fix_3mf_tr->inverse());
-    text_lines.init(mv_trafo, volumes, style_manager, count_lines);
+    text_lines.init(volume_tr, volumes, style_manager, count_lines);
 }
 }
 
@@ -1185,27 +1276,8 @@ void GLGizmoEmboss::set_volume_by_selection()
     const EmbossStyle    &style = tc.style;
 
     std::optional<wxString> installed_name = get_installed_face_name(style.prop.face_name, *m_face_names);
-
-    wxFont wx_font;
-    // load wxFont from same OS when font name is installed
-    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
-        wx_font = WxFontUtils::load_wxFont(style.path);
-
-    // Flag that is selected same font
-    bool is_exact_font = true;
-    // Different OS or try found on same OS
-    if (!wx_font.IsOk()) {
-        is_exact_font = false;
-        // Try create similar wx font by FontFamily
-        wx_font = WxFontUtils::create_wxFont(style);
-        if (installed_name.has_value() && !installed_name->empty())
-            is_exact_font = wx_font.SetFaceName(*installed_name);
-
-        // Have to use some wxFont
-        if (!wx_font.IsOk())
-            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-    }
-    assert(wx_font.IsOk());
+    bool is_exact_font;
+    wxFont wx_font = load_wx_font(style, installed_name, is_exact_font);
 
     // Load style to style manager
     const auto &styles = m_style_manager.get_styles();

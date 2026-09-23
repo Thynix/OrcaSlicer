@@ -68,6 +68,16 @@ public:
     /// <returns>True on success otherwise False</returns>
     static bool re_emboss(const ModelVolume &text, std::shared_ptr<std::atomic<bool>> job_cancel = nullptr);
 
+    /// <summary>
+    /// Create text mesh from the volume's text configuration on the calling thread,
+    /// e.g. for a text volume loaded from .3mf without a mesh.
+    /// Volume must be placed in its object, but need not be in the scene.
+    /// Volume must have text configuration and emboss shape, otherwise it is left unchanged.
+    /// </summary>
+    /// <param name="is_exact_font">Optional output, false when a similar font is used instead of the stored one</param>
+    /// <returns>True on success, otherwise False and a valid text volume gets a placeholder mesh</returns>
+    static bool rebuild_text_mesh(ModelVolume &text, bool *is_exact_font = nullptr);
+
 protected:
     bool on_init() override;
     std::string on_get_name() const override;

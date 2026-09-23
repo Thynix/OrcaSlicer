@@ -183,12 +183,6 @@ template<typename Fnc> TriangleMesh try_create_mesh(DataBase &input, const Fnc& 
 template<typename Fnc> TriangleMesh create_mesh(DataBase &input, const Fnc& was_canceled, Job::Ctl &ctl);
 
 /// <summary>
-/// Create default mesh for embossed text
-/// </summary>
-/// <returns>Not empty model(index trinagle set - its)</returns>
-TriangleMesh create_default_mesh();
-
-/// <summary>
 /// Must be called on main thread
 /// </summary>
 /// <param name="mesh">New mesh data</param>
@@ -565,6 +559,26 @@ SurfaceVolumeData::ModelSources create_volume_sources(const ModelVolume &text_vo
     if (volumes.size() <= 1)
         return {};
     return ::create_sources(volumes, text_volume.id().id);
+}
+
+TriangleMesh create_mesh_blocking(DataBase &input, const ModelVolume &volume, const Transform3d &transform)
+{
+    auto was_canceled = []() { return false; };
+    try {
+        if (input.shape.projection.use_surface && !volume.is_the_only_one_part()) {
+            SurfaceVolumeData surface{transform, create_volume_sources(volume)};
+            if (!surface.sources.empty())
+                return ::cut_surface(input, surface, was_canceled);
+            // No surface to cut from, e.g. the other parts are texts not rebuilt yet (empty meshes are skipped,
+            // so the result depends on volume order). Create flat text, but keep use_surface for later edits.
+        }
+        return ::try_create_mesh(input, was_canceled);
+    } catch (const std::bad_alloc &) {
+        throw; // fatal, left to the app's handler
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "Can't create mesh for embossed volume \"" << volume.name << "\": " << e.what();
+        return {};
+    }
 }
 
 bool start_create_volume(CreateVolumeParams &input, DataBasePtr data, const Vec2d &mouse_pos)
@@ -972,7 +986,9 @@ TriangleMesh create_mesh(DataBase &input, const Fnc& was_canceled, Job::Ctl& ctl
     return result;
 }
 
-TriangleMesh create_default_mesh()
+} // namespace
+
+TriangleMesh Slic3r::GUI::Emboss::create_default_mesh()
 {
     // When cant load any font use default object loaded from file
     std::string  path = Slic3r::resources_dir() + "/data/embossed_text.obj";
@@ -985,6 +1001,8 @@ TriangleMesh create_default_mesh()
     }
     return triangle_mesh;
 }
+
+namespace {
 
 void update_name_in_list(const ObjectList& object_list, const ModelVolume& volume)
 {

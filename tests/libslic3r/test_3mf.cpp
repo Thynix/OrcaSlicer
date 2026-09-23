@@ -19,6 +19,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <algorithm>
+#include <functional>
 
 #include <catch2/catch_tostring.hpp>
 #include <Eigen/Core>
@@ -184,16 +185,12 @@ static bool read_cad_recipe_entry(const std::string& path, std::string& out,
     return found;
 }
 
-// Rewrites the archive at `path` with the recipe entry back under the name it had before the
-// rename, which is what every project saved by an earlier build looks like on disk. Generated
-// rather than checked in because a whole project archive is not frozen evidence the way a bare
-// recipe blob is -- it has to be whatever today's exporter writes, with only the name aged.
-// miniz cannot rename in place and open_zip_writer truncates, so the entries are held across
-// the switch.
-static void rename_cad_recipe_entry_to_legacy(const std::string& path)
+// Rewrites every file entry of the archive at `path` through `edit`, which may change its name
+// and data. miniz cannot edit in place and open_zip_writer truncates, so the entries are held
+// across the switch.
+static void rewrite_zip_entries(const std::string& path, const std::function<void(std::string& name, std::string& data)>& edit)
 {
     std::vector<std::pair<std::string, std::string>> entries;
-    bool renamed = false;
     {
         mz_zip_archive zip;
         mz_zip_zero_struct(&zip);
@@ -208,22 +205,33 @@ static void rename_cad_recipe_entry_to_legacy(const std::string& path)
             std::string data((size_t) st.m_uncomp_size, '\0');
             if (st.m_uncomp_size > 0)
                 REQUIRE(mz_zip_reader_extract_to_mem(&zip, i, data.data(), data.size(), 0));
-            if (boost::algorithm::iequals(name, CAD_RECIPE_ENTRY)) {
-                name    = LEGACY_CAD_RECIPE_ENTRY;
-                renamed = true;
-            }
+            edit(name, data);
             entries.emplace_back(std::move(name), std::move(data));
         }
         close_zip_reader(&zip);
     }
-    // Without this the scenario would degrade silently into re-testing the new name if the
-    // exporter's constant ever moved again: every load below would still pass.
-    REQUIRE(renamed);
-
     Zipper out(path);
     for (const auto& e : entries)
         out.add_entry(e.first, e.second.data(), e.second.size());
     out.finalize();
+}
+
+// Rewrites the archive at `path` with the recipe entry back under the name it had before the
+// rename, which is what every project saved by an earlier build looks like on disk. Generated
+// rather than checked in because a whole project archive is not frozen evidence the way a bare
+// recipe blob is -- it has to be whatever today's exporter writes, with only the name aged.
+static void rename_cad_recipe_entry_to_legacy(const std::string& path)
+{
+    bool renamed = false;
+    rewrite_zip_entries(path, [&renamed](std::string& name, std::string&) {
+        if (boost::algorithm::iequals(name, CAD_RECIPE_ENTRY)) {
+            name    = LEGACY_CAD_RECIPE_ENTRY;
+            renamed = true;
+        }
+    });
+    // Without this the scenario would degrade silently into re-testing the new name if the
+    // exporter's constant ever moved again: every load below would still pass.
+    REQUIRE(renamed);
 }
 
 // The recipe lives only in the BBS-native backend, because that is the only one that runs:
@@ -1461,3 +1469,129 @@ SCENARIO("bbs_3mf_is_published detects only genuinely published 3MFs", "[3mf]") 
     }
 }
 
+
+// A text part may be stored with its <mesh> emptied and rebuilt from its text configuration by
+// the GUI. Only a caller passing KeepEmptyText can rebuild it, so everyone else must keep dropping
+// it, as they did before, rather than getting an empty volume that crashes slicing and export.
+TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "[3mf]") {
+    Model model;
+    ScopedTemporaryDir backup_dir("orca_empty_text");
+    model.set_backup_path(backup_dir.string());
+    ModelObject* object = model.add_object();
+    object->name = "object";
+
+    ModelVolume* cube = object->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)));
+    cube->name = "cube";
+    cube->config.set("extruder", 1);
+
+    // A part stripped of its mesh with nothing to rebuild it from.
+    ModelVolume* plain = object->add_volume(TriangleMesh(its_make_cube(5., 5., 5.)));
+    plain->name = "plain";
+    plain->config.set("extruder", 3);
+
+    // Freshly created text is not centered, so the exporter writes a non-identity fix_3mf_tr.
+    ModelVolume* text = object->add_volume(TriangleMesh(its_make_cube(4., 2., 1.)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    text->name = "text";
+    text->config.set("extruder", 2);
+    const Transform3d text_matrix = Geometry::assemble_transform(Vec3d(5., 7., 3.), Vec3d(0., 0., PI / 2.));
+    text->set_transformation(Geometry::Transformation(text_matrix));
+    text->text_configuration = TextConfiguration{};
+    text->text_configuration->text = "Orca";
+    text->emboss_shape = EmbossShape{};
+    object->add_instance();
+
+    ScopedTemporaryFile temp(".3mf");
+    const std::string path = temp.string();
+    DynamicPrintConfig cfg;
+    StoreParams sp;
+    sp.path     = path.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel;
+    REQUIRE(store_bbs_3mf(sp));
+
+    auto load = [&path](LoadStrategy extra, Model& dst) {
+        ScopedTemporaryDir        dst_backup_dir("orca_empty_text_dst");
+        dst.set_backup_path(dst_backup_dir.string());
+        DynamicPrintConfig        dst_config;
+        ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Enable};
+        PlateDataPtrs             dst_plates;
+        std::vector<Preset*>      project_presets;
+        bool                      is_bbl_3mf = false, is_orca_3mf = false;
+        Semver                    file_version;
+        const bool ok = load_bbs_3mf(path.c_str(), &dst_config, &ctxt, &dst, &dst_plates, &project_presets, &is_bbl_3mf,
+                                     &is_orca_3mf, &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | extra);
+        release_PlateData_list(dst_plates);
+        REQUIRE(ok);
+        REQUIRE(dst.objects.size() == 1);
+    };
+    auto find_volume = [](const Model& m, const std::string& name) -> const ModelVolume* {
+        for (const ModelVolume* v : m.objects.front()->volumes)
+            if (v->name == name)
+                return v;
+        return nullptr;
+    };
+
+    SECTION("a text part with its mesh keeps its fix_3mf_tr") {
+        Model dst;
+        load(LoadStrategy::KeepEmptyText, dst);
+        const ModelVolume* loaded = find_volume(dst, "text");
+        REQUIRE(loaded != nullptr);
+        REQUIRE(loaded->emboss_shape.has_value());
+        REQUIRE(loaded->emboss_shape->fix_3mf_tr.has_value());
+        REQUIRE_FALSE(loaded->emboss_shape->fix_3mf_tr->isApprox(Transform3d::Identity()));
+    }
+
+    // Empty the <mesh> of the "plain" and "text" sub-objects; the exporter writes them in volume order.
+    int stripped = 0;
+    rewrite_zip_entries(path, [&stripped](const std::string& name, std::string& data) {
+        if (!boost::algorithm::starts_with(name, "3D/Objects/"))
+            return;
+        size_t pos = 0;
+        for (int index = 0; (pos = data.find("<object ", pos)) != std::string::npos; ++index, ++pos) {
+            if (index == 0)
+                continue;
+            const size_t begin = data.find("<mesh>", pos);
+            const size_t end   = data.find("</mesh>", begin);
+            REQUIRE(end != std::string::npos);
+            data.replace(begin, end - begin, "<mesh><vertices/><triangles/>");
+            ++stripped;
+        }
+    });
+    REQUIRE(stripped == 2);
+
+    SECTION("with KeepEmptyText the text part is kept empty and the plain part is skipped") {
+        Model dst;
+        load(LoadStrategy::KeepEmptyText, dst);
+        REQUIRE(dst.objects.front()->volumes.size() == 2);
+        REQUIRE(find_volume(dst, "plain") == nullptr);
+
+        const ModelVolume* loaded_cube = find_volume(dst, "cube");
+        REQUIRE(loaded_cube != nullptr);
+        REQUIRE(loaded_cube->mesh().facets_count() == 12);
+        REQUIRE(loaded_cube->type() == ModelVolumeType::MODEL_PART);
+        REQUIRE(loaded_cube->extruder_id() == 1);
+
+        const ModelVolume* loaded_text = find_volume(dst, "text");
+        REQUIRE(loaded_text != nullptr);
+        REQUIRE(loaded_text->mesh().empty());
+        REQUIRE(loaded_text->type() == ModelVolumeType::NEGATIVE_VOLUME);
+        REQUIRE(loaded_text->config.opt_int("extruder") == 2);
+        REQUIRE(loaded_text->text_configuration.has_value());
+        REQUIRE(loaded_text->text_configuration->text == "Orca");
+        REQUIRE(loaded_text->emboss_shape.has_value());
+        // The component transform is the text frame; the fix only corrects a centering the empty mesh never got.
+        REQUIRE_FALSE(loaded_text->emboss_shape->fix_3mf_tr.has_value());
+        REQUIRE(loaded_text->get_matrix().isApprox(text_matrix, 1e-6));
+    }
+
+    SECTION("without KeepEmptyText both empty parts are dropped and the other part is intact") {
+        Model dst;
+        load(LoadStrategy::Default, dst);
+        REQUIRE(dst.objects.front()->volumes.size() == 1);
+        const ModelVolume* loaded_cube = dst.objects.front()->volumes.front();
+        REQUIRE(loaded_cube->name == "cube");
+        REQUIRE(loaded_cube->mesh().facets_count() == 12);
+        REQUIRE(loaded_cube->extruder_id() == 1);
+    }
+}

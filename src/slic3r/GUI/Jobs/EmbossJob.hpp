@@ -195,6 +195,22 @@ public:
 SurfaceVolumeData::ModelSources create_volume_sources(const ModelVolume &volume);
 
 /// <summary>
+/// Create default mesh for embossed text
+/// </summary>
+/// <returns>Not empty model(indexed triangle set - its)</returns>
+TriangleMesh create_default_mesh();
+
+/// <summary>
+/// Create mesh for embossed volume on the calling thread, without a job
+/// e.g. to rebuild a text volume loaded from .3mf without a mesh
+/// </summary>
+/// <param name="input">Shape of emboss</param>
+/// <param name="volume">Volume to create mesh for, placed in its object</param>
+/// <param name="transform">Transformation of volume inside of object, used when projecting on surface</param>
+/// <returns>Mesh of volume, empty on failure</returns>
+TriangleMesh create_mesh_blocking(DataBase &input, const ModelVolume &volume, const Transform3d &transform);
+
+/// <summary>
 /// shorten params for start_crate_volume functions
 /// </summary>
 struct CreateVolumeParams

@@ -139,6 +139,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "Gizmos/GLGizmoEmboss.hpp" // Rebuild text loaded without mesh
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -8558,7 +8559,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     std::vector<Preset *>     project_presets;
                     // BBS: backup & restore
                     q->skip_thumbnail_invalid = true;
-                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type, strategy, &plate_data, &project_presets,
+                    // KeepEmptyText: text parts without a mesh are rebuilt below.
+                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type,
+                                                             strategy | LoadStrategy::KeepEmptyText, &plate_data, &project_presets,
                                                              &file_version,
                                                              [&dlg, real_filename, &progress_percent, stage_percent, INPUT_FILES_RATIO, total_files, i,
                                                               &is_user_cancel](int import_stage, int current, int total, bool &cancel) {
@@ -9442,6 +9445,44 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         if (!dlg_cont) {
             q->skip_thumbnail_invalid = false;
             return empty_result;
+        }
+
+        // Text parts stored in .3mf without a mesh are rebuilt from their text configuration,
+        // before the loaded model is validated and placed below.
+        if (type_3mf) {
+            std::vector<std::string> failed_texts;
+            std::vector<std::string> similar_font_texts;
+            for (ModelObject *model_object : model.objects) {
+                bool is_rebuilt = false;
+                for (ModelVolume *volume : model_object->volumes) {
+                    if (volume->mesh().empty() && volume->text_configuration.has_value() && volume->emboss_shape.has_value()) {
+                        bool is_exact_font = true;
+                        if (!GLGizmoEmboss::rebuild_text_mesh(*volume, &is_exact_font))
+                            failed_texts.push_back(volume->name);
+                        else if (!is_exact_font)
+                            similar_font_texts.push_back(volume->name);
+                        is_rebuilt = true;
+                    }
+                }
+                if (is_rebuilt)
+                    model_object->invalidate_bounding_box();
+            }
+            std::string message;
+            if (!failed_texts.empty()) {
+                message = _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:");
+                for (const std::string &name : failed_texts)
+                    message += "\n-" + name;
+            }
+            if (!similar_font_texts.empty()) {
+                if (!message.empty())
+                    message += "\n";
+                message += _u8L("The font of some text parts is not installed. A similar font is used for:");
+                for (const std::string &name : similar_font_texts)
+                    message += "\n-" + name;
+            }
+            if (!message.empty())
+                q->get_notification_manager()->bbl_show_3mf_warn_notification(message,
+                                                                              NotificationManager::NotificationLevel::WarningNotificationLevel);
         }
 
         if (load_model) {

@@ -1086,6 +1086,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_load_model = false;
         bool m_load_aux = false;
         bool m_load_config = false;
+        bool m_keep_empty_text = false;
         // backup & restore
         bool m_load_restore = false;
         std::string m_backup_path;
@@ -1404,6 +1405,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_load_aux = strategy & LoadStrategy::LoadAuxiliary;
         m_load_restore = strategy & LoadStrategy::Restore;
         m_load_config = strategy & LoadStrategy::LoadConfig;
+        m_keep_empty_text = strategy & LoadStrategy::KeepEmptyText;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object = nullptr;
@@ -5009,9 +5011,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         id_list.push_back(std::pair(comp, current_item.second * comp.transform));
                     }
                 }
-                else if (!(current_object->second.geometry.empty())) {
-                    //CurrentObject* ptr = &(current_objects[current_id]);
-                    //CurrentObject* ptr2 = &(current_object->second);
+                else if (m_keep_empty_text || !current_object->second.geometry.empty()) {
+                    // With KeepEmptyText, leaves without geometry are kept too: a text part may be stored without
+                    // a mesh and rebuilt by the caller from its text configuration. _generate_volumes_new() skips the rest.
                     sub_objects.push_back({ current_object->first, current_item.second});
                 }
             }
@@ -5100,11 +5102,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             const size_t triangles_count = sub_object->geometry.triangles.size();
-            if (triangles_count == 0) {
-                add_error("found no trianges in the object " + std::to_string(sub_object->id));
-                return false;
+            // A text part without a mesh is loaded empty; the caller rebuilds it from its text configuration.
+            const bool empty_text = m_keep_empty_text && sub_object->geometry.empty() && volume_data->text_configuration.has_value() &&
+                                    volume_data->shape_configuration.has_value();
+            if (empty_text) {
+                volume = object.add_volume(TriangleMesh(), ModelVolumeType::MODEL_PART, false);
             }
-            if (!shared_volume){
+            else if (sub_object->geometry.empty()) {
+                // No geometry and nothing to rebuild it from, e.g. an empty mesh object.
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": skipping object %1% without triangles") % sub_object->id;
+                continue;
+            }
+            else if (!shared_volume){
                 // splits volume out of imported geometry
                 indexed_triangle_set its;
                 its.indices.assign(sub_object->geometry.triangles.begin(), sub_object->geometry.triangles.end());
@@ -5208,7 +5217,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             volume->set_type(volume_data->part_type);
             
             if (auto &es = volume_data->shape_configuration; es.has_value())
-                volume->emboss_shape = std::move(es);            
+                volume->emboss_shape = std::move(es);
+            // For a text part without a mesh, the component transform is the text frame and the shape's
+            // fix transform is ignored: it corrects a centering done on load, which an empty mesh does not get.
+            // Scripts stripping the mesh of a saved text part must write comp * T(center of the mesh bbox) * fix^-1.
+            if (empty_text)
+                volume->emboss_shape->fix_3mf_tr.reset();
             if (auto &tc = volume_data->text_configuration; tc.has_value())
                 volume->text_configuration = std::move(tc);
 

@@ -17,6 +17,8 @@
 
 #include "libnest2d/common.hpp"
 
+#include <numeric>
+
 #define SAVE_ARRANGE_POLY 0
 
 namespace Slic3r { namespace GUI {

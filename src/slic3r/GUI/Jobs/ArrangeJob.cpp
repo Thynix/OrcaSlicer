@@ -38,6 +38,8 @@
 #include "libslic3r/LifecycleEvents.hpp"
 #include <optional>
 
+#include <numeric>
+
 #define SAVE_ARRANGE_POLY 0
 
 namespace Slic3r { namespace GUI {

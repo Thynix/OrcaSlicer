@@ -21,6 +21,8 @@
 #include <wx/dialog.h>
 #include "slic3r/GUI/FilamentMapPanel.hpp"
 
+#include <numeric>
+
 namespace Slic3r { namespace GUI {
 
 static bool get_pop_up_remind_flag()

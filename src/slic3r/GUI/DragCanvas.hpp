@@ -11,6 +11,9 @@
 #include <wx/event.h>
 #include <wx/colour.h>
 
+#include <string>
+#include <vector>
+
 namespace Slic3r { namespace GUI {
 
 class DragShape : public wxObject

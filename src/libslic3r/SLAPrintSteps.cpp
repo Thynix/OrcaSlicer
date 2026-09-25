@@ -1,4 +1,5 @@
 #include <unordered_set>
+#include <numeric>
 
 #include <libslic3r/Exception.hpp>
 #include <libslic3r/SLAPrintSteps.hpp>

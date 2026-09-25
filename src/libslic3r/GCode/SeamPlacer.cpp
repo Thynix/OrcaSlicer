@@ -6,6 +6,7 @@
 #include "tbb/blocked_range.h"
 #include "tbb/parallel_reduce.h"
 #include <boost/log/trivial.hpp>
+#include <numeric>
 #include <random>
 #include <algorithm>
 #include <queue>

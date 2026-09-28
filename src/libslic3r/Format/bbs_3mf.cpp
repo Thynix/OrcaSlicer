@@ -5221,8 +5221,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // For a text part without a mesh, the component transform is the text frame and the shape's
             // fix transform is ignored: it corrects a centering done on load, which an empty mesh does not get.
             // Scripts stripping the mesh of a saved text part must write comp * T(center of the mesh bbox) * fix^-1.
-            if (empty_text)
-                volume->emboss_shape->fix_3mf_tr.reset();
             if (auto &tc = volume_data->text_configuration; tc.has_value())
                 volume->text_configuration = std::move(tc);
 

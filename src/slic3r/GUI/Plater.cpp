@@ -9468,18 +9468,17 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     model_object->invalidate_bounding_box();
             }
             std::string message;
-            if (!failed_texts.empty()) {
-                message = _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:");
-                for (const std::string &name : failed_texts)
-                    message += "\n-" + name;
-            }
-            if (!similar_font_texts.empty()) {
+            auto append_section = [&message](const std::vector<std::string> &names, const std::string &header) {
+                if (names.empty())
+                    return;
                 if (!message.empty())
                     message += "\n";
-                message += _u8L("The font of some text parts is not installed. A similar font is used for:");
-                for (const std::string &name : similar_font_texts)
+                message += header;
+                for (const std::string &name : names)
                     message += "\n-" + name;
-            }
+            };
+            append_section(failed_texts, _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:"));
+            append_section(similar_font_texts, _u8L("The font of some text parts is not installed. A similar font is used for:"));
             if (!message.empty())
                 q->get_notification_manager()->bbl_show_3mf_warn_notification(message,
                                                                               NotificationManager::NotificationLevel::WarningNotificationLevel);

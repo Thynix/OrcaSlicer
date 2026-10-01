@@ -7,10 +7,13 @@
 #include <optional>
 #include "slic3r/GUI/3DScene.hpp"
 #include <string>
+#include <wx/string.h>
+#include <wx/font.h>
 #include <libslic3r/Emboss.hpp>
 #include <libslic3r/EmbossShape.hpp> // ExPolygonsWithIds
 #include <utility>
 #include <vector>
+#include <libslic3r/TextConfiguration.hpp>
 #include "libslic3r/Point.hpp" // Transform3d
 #include "libslic3r/ObjectID.hpp"
 
@@ -34,6 +37,7 @@ class Selection;
 }}
 
 namespace Slic3r::GUI::Emboss {
+class StyleManager;
 
 /// <summary>
 /// Base data hold data for create emboss shape
@@ -84,6 +88,24 @@ public:
 
     // shape to emboss
     EmbossShape shape;
+};
+
+/// <summary>
+/// Text volume data: shape is created from text and font
+/// </summary>
+struct TextDataBase : public DataBase
+{
+    TextDataBase(DataBase &&parent, const Slic3r::Emboss::FontFileWithCache &font_file,
+        TextConfiguration &&text_configuration, const EmbossProjection& projection);
+    // Create shape from text + font configuration
+    EmbossShape &create_shape() override;
+    void write(ModelVolume &volume) const override;
+
+private:
+    //  Keep pointer on Data of font (glyph shapes)
+    Slic3r::Emboss::FontFileWithCache m_font_file;
+    // font item is not used for create object
+    TextConfiguration m_text_configuration;
 };
 
 /// <summary>
@@ -198,6 +220,29 @@ public:
 /// <param name="volume">Define embossed volume</param>
 /// <returns>Source data for cut surface from</returns>
 SurfaceVolumeData::ModelSources create_volume_sources(const ModelVolume &volume);
+
+/// <summary>
+/// Volumes of the object which the text volume can be projected onto: its other model parts
+/// </summary>
+std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &mv);
+
+/// <summary>
+/// Init lines of per glyph text for volume with transformation inside of its object, which need not be in the scene
+/// </summary>
+/// <param name="count_lines">Count of text lines, calculated from the text when zero</param>
+void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines = 0);
+
+struct LoadedWxFont
+{
+    wxFont font;
+    // false when a similar font is used instead of the stored one
+    bool is_exact;
+};
+/// <summary>
+/// wxFont of the style on this OS, or a similar one when the style comes from another OS or its font is not installed
+/// </summary>
+/// <param name="installed_name">Face name of the style when it is installed, see the gizmo's get_installed_face_name()</param>
+LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name);
 
 /// <summary>
 /// shorten params for start_crate_volume functions

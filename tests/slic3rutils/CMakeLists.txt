@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     test_web_media_controller.cpp
     test_scene_raycaster.cpp
     test_scene_benchmark.cpp
+    test_emboss_rebuild.cpp
     test_lazy.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp

@@ -57,6 +57,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/Utils/WxFontUtils.hpp"
 
+#include <wx/fontenum.h>
 #include <wx/settings.h>
 
 namespace Slic3r { class GLVolume; }
@@ -755,6 +756,20 @@ void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, c
     text_lines.init(volume_tr, volumes, style_manager, count_lines);
 }
 
+std::vector<ModelVolume *> missing_text_volumes_in_rebuild_order(const ModelObject &object)
+{
+    auto is_missing = [](const ModelVolume *v) {
+        return v->mesh().empty() && v->text_configuration.has_value() && v->emboss_shape.has_value();
+    };
+    std::vector<ModelVolume *> ordered;
+    for (bool projected : {false, true})
+        for (ModelVolume *volume : object.volumes)
+            if (is_missing(volume) &&
+                projected == (volume->text_configuration->style.prop.per_glyph || volume->emboss_shape->projection.use_surface))
+                ordered.push_back(volume);
+    return ordered;
+}
+
 LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name)
 {
     wxFont wx_font;
@@ -778,6 +793,143 @@ LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString
     }
     assert(wx_font.IsOk());
     return {wx_font, is_exact_font};
+}
+
+namespace {
+// The gizmo's get_installed_face_name() on wx's face name cache
+std::optional<wxString> get_installed_face_name(const std::optional<std::string> &face_name_opt)
+{
+    if (!face_name_opt.has_value())
+        return wxString();
+    wxString face_name = wxString::FromUTF8(face_name_opt->c_str());
+    if (wxFontEnumerator::IsValidFacename(face_name))
+        return face_name;
+    return {};
+}
+
+// Create mesh for embossed volume on the calling thread, without a job.
+// Must not throw (except bad_alloc): it runs while a project loads, and a failure there becomes a placeholder mesh.
+// Pushes onto result.flat_fallback when use_surface text had no surface and was created flat.
+TriangleMesh create_mesh_blocking(DataBase &input, const ModelVolume &volume, const Transform3d &transform, RebuildTextsResult &result)
+{
+    auto was_canceled = []() { return false; };
+    try {
+        bool is_flat_fallback = false;
+        if (input.shape.projection.use_surface && !volume.is_the_only_one_part()) {
+            SurfaceVolumeData surface{transform, create_volume_sources(volume)};
+            if (!surface.sources.empty()) {
+                try {
+                    if (TriangleMesh mesh = ::cut_surface(input, surface, was_canceled); !mesh.empty())
+                        return mesh;
+                } catch (const JobException &e) {
+                    BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\": " << e.what();
+                }
+            }
+            is_flat_fallback = true;
+        }
+        TriangleMesh mesh = ::try_create_mesh(input, was_canceled);
+        if (is_flat_fallback && !mesh.empty()) {
+            // No surface to cut from: the text is off the other parts, or they are texts not rebuilt yet (empty
+            // meshes are skipped, so the result depends on volume order). Create flat text, but keep use_surface
+            // for later edits.
+            BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\" has no surface to project onto, created flat";
+            result.flat_fallback.push_back(volume.name);
+        }
+        return mesh;
+    } catch (const std::bad_alloc &) {
+        throw; // fatal, left to the app's handler
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "Can't create mesh for embossed volume \"" << volume.name << "\": " << e.what();
+        return {};
+    }
+}
+
+/// <summary>
+/// Create text mesh from the volume's text configuration on the calling thread.
+/// Volume must have text configuration and emboss shape. A text volume that can't be created gets a placeholder mesh.
+/// </summary>
+/// <param name="style_manager">Reusable by the caller for many volumes; its active style is replaced</param>
+/// <param name="result">Volume name is pushed onto placeholder, similar_font or flat_fallback as applicable</param>
+void rebuild_text_mesh(ModelVolume &text_volume, StyleManager &style_manager, RebuildTextsResult &result)
+{
+    assert(text_volume.text_configuration.has_value() && text_volume.emboss_shape.has_value());
+    const TextConfiguration &tc = *text_volume.text_configuration;
+    const EmbossShape       &es = *text_volume.emboss_shape;
+    const Transform3d       &tr = text_volume.get_matrix(); // the text frame, see the .3mf importer
+
+    TriangleMesh mesh;
+    const StyleManager::Style style{tc.style, es.projection};
+    bool is_exact  = true;
+    bool is_loaded = style.type == EmbossStyle::Type::file_path && style_manager.load_style(style);
+    if (!is_loaded) {
+        // Same fallback as the gizmo, e.g. for a font from another OS or a font file that is gone.
+        const LoadedWxFont font = load_wx_font(style, get_installed_face_name(style.prop.face_name));
+        is_exact  = font.is_exact;
+        is_loaded = style_manager.load_style(style, font.font);
+        if (!is_loaded && is_exact) {
+            // Installed but unloadable, e.g. a broken font file; the gizmo lists such faces as "bad"
+            is_exact  = false;
+            is_loaded = style_manager.load_style(style, load_wx_font(style, {}).font);
+        }
+    }
+    if (is_loaded) {
+        DataBase base(text_volume.name, std::make_shared<std::atomic<bool>>(false));
+        base.is_outside = text_volume.type() == ModelVolumeType::MODEL_PART;
+        if (tc.style.prop.per_glyph) {
+            TextLinesModel text_lines;
+            init_volume_text_lines(text_lines, text_volume, tr, style_manager);
+            base.text_lines = text_lines.get_lines();
+        }
+        TextDataBase data(std::move(base), style_manager.get_font_file_with_cache(), TextConfiguration(tc), es.projection);
+        mesh = create_mesh_blocking(data, text_volume, tr, result);
+        if (!mesh.empty())
+            data.write(text_volume);
+    } else
+        BOOST_LOG_TRIVIAL(warning) << "Can't load font for text volume \"" << text_volume.name << "\"";
+
+    const bool is_rebuilt = !mesh.empty();
+    if (!is_rebuilt) {
+        // Same placeholder as the gizmo uses when text has no shape
+        mesh = ::create_default_mesh();
+        result.placeholder.push_back(text_volume.name);
+    } else if (!is_exact)
+        result.similar_font.push_back(text_volume.name);
+    text_volume.set_mesh(std::move(mesh));
+    text_volume.calculate_convex_hull();
+}
+} // namespace
+
+RebuildTextsResult rebuild_missing_text_meshes(Model &model)
+{
+    // Only loads fonts by style: no AppConfig, ImGui font or default styles are needed.
+    StyleManager style_manager(nullptr, {});
+    RebuildTextsResult result;
+    // Fonts may have been installed since wx cached the face names; enumerated again on first use.
+    wxFontEnumerator::InvalidateCache();
+    for (ModelObject *object : model.objects) {
+        for (ModelVolume *volume : missing_text_volumes_in_rebuild_order(*object))
+            rebuild_text_mesh(*volume, style_manager, result);
+        object->invalidate_bounding_box();
+    }
+    return result;
+}
+
+std::string RebuildTextsResult::warning_text() const
+{
+    std::string message;
+    auto append_section = [&message](const std::vector<std::string> &names, const std::string &header) {
+        if (names.empty())
+            return;
+        if (!message.empty())
+            message += "\n";
+        message += header;
+        for (const std::string &name : names)
+            message += "\n- " + name;
+    };
+    append_section(placeholder, _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:"));
+    append_section(similar_font, _u8L("The font of some text parts is not available. A similar font is used for:"));
+    append_section(flat_fallback, _u8L("Some text parts had no surface to project onto. They are flat until re-embossed:"));
+    return message;
 }
 
 TextDataBase::TextDataBase(DataBase               &&parent,

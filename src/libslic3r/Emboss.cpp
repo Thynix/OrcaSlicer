@@ -1165,7 +1165,7 @@ std::unique_ptr<FontFile> Emboss::create_font_file(const char *file_path)
 {
     FILE *file = std::fopen(file_path, "rb");
     if (file == nullptr) {
-        assert(false);
+        // A file_path style's file is machine-specific and may be gone, e.g. a .3mf from another machine.
         BOOST_LOG_TRIVIAL(error) << "Couldn't open " << file_path << " for reading.";
         return nullptr;
     }

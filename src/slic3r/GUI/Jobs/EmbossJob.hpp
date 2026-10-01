@@ -23,6 +23,8 @@
 namespace Slic3r {
 class TriangleMesh;
 class ModelVolume;
+class Model;
+class ModelObject;
 enum class ModelVolumeType : int;
 class BuildVolume;
 namespace GUI {
@@ -229,17 +231,44 @@ std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &text_volu
 /// <param name="count_lines">Count of text lines, calculated from the text when zero</param>
 void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &text_volume, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines = 0);
 
-/// <summary>
-/// wxFont of the style on this OS, or a similar one when the style comes from another OS or its font is not installed
-/// </summary>
-/// <param name="installed_name">Face name of the style when it is installed, see the gizmo's get_installed_face_name()</param>
 struct LoadedWxFont
 {
     wxFont font;
     // false when a similar font is used instead of the stored one
     bool is_exact;
 };
+/// <summary>
+/// wxFont of the style on this OS, or a similar one when the style comes from another OS or its font is not installed
+/// </summary>
+/// <param name="installed_name">Face name of the style when it is installed, see the gizmo's get_installed_face_name()</param>
 LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name);
+
+/// <summary>
+/// Names of text volumes which could not be rebuilt exactly, see rebuild_missing_text_meshes()
+/// </summary>
+struct RebuildTextsResult
+{
+    // Can't create the text from its font, a placeholder mesh is used
+    std::vector<std::string> placeholder;
+    // Rebuilt with a similar font, because the stored one is not installed
+    std::vector<std::string> similar_font;
+    // Use-surface text with no surface to project onto is created flat, use_surface is kept
+    std::vector<std::string> flat_fallback;
+
+    // Message for the user, empty when there is nothing to warn about
+    std::string warning_text() const;
+};
+
+/// <summary>
+/// Text volumes of the object without a mesh: flat ones first, since projected ones need the other parts' meshes.
+/// </summary>
+std::vector<ModelVolume *> missing_text_volumes_in_rebuild_order(const ModelObject &object);
+
+/// <summary>
+/// Rebuild, on the calling thread, the mesh of every text volume that has none, e.g. one loaded from .3mf with
+/// LoadStrategy::KeepEmptyText. See docs/HLSD/3mf-text-parts.md.
+/// </summary>
+RebuildTextsResult rebuild_missing_text_meshes(Model &model);
 
 /// <summary>
 /// shorten params for start_crate_volume functions

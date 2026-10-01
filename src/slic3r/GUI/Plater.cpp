@@ -140,6 +140,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "Jobs/EmbossJob.hpp" // Rebuild text loaded without mesh
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -8907,7 +8908,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     std::vector<Preset *>     project_presets;
                     // BBS: backup & restore
                     q->skip_thumbnail_invalid = true;
-                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type, strategy, &plate_data, &project_presets,
+                    // KeepEmptyText: text parts without a mesh are rebuilt below.
+                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type,
+                                                             strategy | LoadStrategy::KeepEmptyText, &plate_data, &project_presets,
                                                              &file_version,
                                                              [&dlg, real_filename, &progress_percent, stage_percent, INPUT_FILES_RATIO, total_files, i,
                                                               &is_user_cancel](int import_stage, int current, int total, bool &cancel) {
@@ -9775,6 +9778,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
                     project_presets.clear();
                 }
+            }
+
+            // Text parts stored without a mesh are rebuilt before the model is validated and placed,
+            // also for a geometry-only import, which has no other way to get their mesh.
+            if (type_3mf) {
+                const std::string message = Emboss::rebuild_missing_text_meshes(model).warning_text();
+                if (!message.empty())
+                    q->get_notification_manager()->bbl_show_3mf_warn_notification(message,
+                                                                                  NotificationManager::NotificationLevel::WarningNotificationLevel);
             }
         } catch (const ConfigurationError &e) {
             std::string message = GUI::format(_L("Failed loading file \"%1%\". An invalid configuration was found."), filename.string()) + "\n\n" + e.what();

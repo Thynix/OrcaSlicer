@@ -207,6 +207,9 @@ enum class LoadStrategy
     LoadAuxiliary = 16,
     Silence = 32,
     ImperialUnits = 64,
+    // Keep text parts stored without a mesh as empty volumes; the caller must rebuild them, e.g. with
+    // Emboss::rebuild_missing_text_meshes(), before the model is sliced or exported.
+    KeepEmptyText = 128,
 
     Restore = 0x10000 | LoadModel | LoadConfig | LoadAuxiliary | Silence,
 };

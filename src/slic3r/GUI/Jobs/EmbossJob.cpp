@@ -26,6 +26,9 @@
 #include "slic3r/GUI/Jobs/Worker.hpp" 
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/RaycastManager.hpp"
+#include "slic3r/Utils/WxFontUtils.hpp"
+
+#include <wx/settings.h>
 
 // #define EXECUTE_UPDATE_ON_MAIN_THREAD // debug execution on main thread
 
@@ -678,6 +681,108 @@ bool start_update_volume(DataUpdate &&data, const ModelVolume &volume, const Sel
     // Run Job on main thread (blocking) - ONLY DEBUG
     return execute_job(std::move(job));
 #endif // EXECUTE_UPDATE_ON_MAIN_THREAD
+}
+
+std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &text_volume)
+{
+    const ModelVolumePtrs &volumes = text_volume.get_object()->volumes;
+    std::vector<ModelVolume *> result;
+    result.reserve(volumes.size());
+    for (ModelVolume *volume : volumes) {
+        // only part could be surface for volumes
+        if (!volume->is_model_part())
+            continue;
+
+        // is selected volume
+        if (text_volume.id() == volume->id())
+            continue;
+
+        result.push_back(volume);
+    }
+    return result;
+}
+
+void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &text_volume, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines)
+{
+    if (text_volume.is_the_only_one_part())
+        return;
+
+    const std::optional<TextConfiguration> &tc_opt = text_volume.text_configuration;
+    if (!tc_opt.has_value())
+        return;
+    const TextConfiguration &tc = *tc_opt;
+
+    // calculate count lines when not set
+    if (count_lines == 0) {
+        count_lines = get_count_lines(tc.text);
+        if (count_lines == 0)
+            return;
+    }
+
+    // prepare volumes to slice
+    std::vector<ModelVolume *> volumes = prepare_volumes_to_slice(text_volume);
+    text_lines.init(volume_tr, volumes, style_manager, count_lines);
+}
+
+LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name)
+{
+    wxFont wx_font;
+    // load wxFont from same OS when font name is installed
+    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
+        wx_font = WxFontUtils::load_wxFont(style.path);
+
+    // Flag that is selected same font
+    bool is_exact_font = true;
+    // Different OS or try found on same OS
+    if (!wx_font.IsOk()) {
+        is_exact_font = false;
+        // Try create similar wx font by FontFamily
+        wx_font = WxFontUtils::create_wxFont(style);
+        if (installed_name.has_value() && !installed_name->empty())
+            is_exact_font = wx_font.SetFaceName(*installed_name);
+
+        // Have to use some wxFont
+        if (!wx_font.IsOk())
+            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    }
+    assert(wx_font.IsOk());
+    return {wx_font, is_exact_font};
+}
+
+TextDataBase::TextDataBase(DataBase               &&parent,
+                           const Slic3r::Emboss::FontFileWithCache &font_file,
+                           TextConfiguration      &&text_configuration,
+                           const EmbossProjection  &projection)
+    : DataBase(std::move(parent)), m_font_file(font_file) /* copy */, m_text_configuration(std::move(text_configuration))
+{
+    assert(m_font_file.has_value());
+    shape.projection = projection; // copy
+
+    const FontProp &fp = m_text_configuration.style.prop;
+    const FontFile &ff = *m_font_file.font_file;
+    shape.scale = get_text_shape_scale(fp, ff);
+}
+
+EmbossShape &TextDataBase::create_shape()
+{
+    if (!shape.shapes_with_ids.empty())
+        return shape;
+
+    // create shape by configuration
+    const char *text = m_text_configuration.text.c_str();
+    std::wstring text_w = boost::nowide::widen(text);
+    const FontProp &fp = m_text_configuration.style.prop;
+    auto was_canceled = [&c = cancel](){ return c->load(); };
+
+    shape.shapes_with_ids = text2vshapes(m_font_file, text_w, fp, was_canceled);
+    return shape;
+}
+
+void TextDataBase::write(ModelVolume &volume) const
+{
+    DataBase::write(volume);
+    volume.text_configuration = m_text_configuration; // copy
+    assert(volume.emboss_shape.has_value());
 }
 
 } // namespace Slic3r::GUI::Emboss

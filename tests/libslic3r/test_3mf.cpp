@@ -1701,6 +1701,7 @@ TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "
     text->set_transformation(Geometry::Transformation(text_matrix));
     text->text_configuration = TextConfiguration{};
     text->text_configuration->text = "Orca";
+    text->text_configuration->style.type = EmbossStyle::Type::file_path;
     text->emboss_shape = EmbossShape{};
 
     object->add_instance();

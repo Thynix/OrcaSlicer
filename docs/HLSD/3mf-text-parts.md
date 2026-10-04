@@ -60,8 +60,8 @@ scratch writes the text frame directly.
 
 - The CLI, Reload from disk and other loaders drop mesh-less text parts with
   only a log line, so slicing a script-edited file with `--slice` loses the
-  text, logged but otherwise silent. Rebuilding needs fonts through wxWidgets,
-  which the CLI build does not link.
+  text, logged but otherwise silent. The rebuild loads fonts through wxWidgets,
+  which the CLI does not initialize.
 - A substituted or placeholder font is not written back to the file on disk, but
   the rebuilt mesh is: re-saving the project from the GUI makes the substitution
   or placeholder permanent, since the next load finds a mesh, runs no rebuild,

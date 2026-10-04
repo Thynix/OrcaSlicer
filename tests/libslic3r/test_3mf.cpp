@@ -1704,6 +1704,14 @@ TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "
     text->text_configuration->style.type = EmbossStyle::Type::file_path;
     text->emboss_shape = EmbossShape{};
 
+    // Text configuration with no shape configuration has nothing to rebuild from either, so it is
+    // dropped like a plain empty volume, not kept the way `text` above is.
+    ModelVolume* text_no_shape = object->add_volume(TriangleMesh(its_make_cube(3., 3., 1.)));
+    text_no_shape->name = "text_no_shape";
+    text_no_shape->text_configuration = TextConfiguration{};
+    text_no_shape->text_configuration->text = "NoShape";
+    text_no_shape->text_configuration->style.type = EmbossStyle::Type::file_path;
+
     object->add_instance();
 
     ScopedTemporaryFile temp(".3mf");
@@ -1752,7 +1760,7 @@ TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "
         }
         return true;
     });
-    REQUIRE(stripped == 2);
+    REQUIRE(stripped == 3);
 
     SECTION("with KeepEmptyText the text part is kept empty and the plain part is skipped") {
         ScopedTemporaryDir dst_backup_dir("orca_empty_text_dst");
@@ -1761,6 +1769,7 @@ TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "
         REQUIRE(dst.objects.size() == 1);
         REQUIRE(dst.objects.front()->volumes.size() == 2);
         REQUIRE(find_volume(dst, "plain") == nullptr);
+        REQUIRE(find_volume(dst, "text_no_shape") == nullptr);
 
         const ModelVolume* loaded_cube = find_volume(dst, "cube");
         REQUIRE(loaded_cube != nullptr);
@@ -1791,5 +1800,73 @@ TEST_CASE("Text parts stored without a mesh are kept only with KeepEmptyText", "
         REQUIRE(loaded_cube->name == "cube");
         REQUIRE(loaded_cube->mesh().facets_count() == 12);
         REQUIRE(loaded_cube->extruder_id() == 1);
+    }
+}
+
+// Unlike the object above, whose cube keeps it non-empty even after its text part loses its mesh,
+// this object's only part is text: _generate_current_object_list (bbs_3mf.cpp) is the only thing
+// standing between the file and an object with no volumes.
+TEST_CASE("An object whose only part is a text part without a mesh is handled by KeepEmptyText", "[3mf]") {
+    Model model;
+    ScopedTemporaryDir backup_dir("orca_empty_text_object");
+    model.set_backup_path(backup_dir.string());
+    ModelObject* object = model.add_object();
+    object->name = "text_only";
+
+    ModelVolume* text = object->add_volume(TriangleMesh(its_make_cube(4., 2., 1.)));
+    text->name = "text";
+    text->text_configuration = TextConfiguration{};
+    text->text_configuration->text = "Orca";
+    text->text_configuration->style.type = EmbossStyle::Type::file_path;
+    text->emboss_shape = EmbossShape{};
+
+    // Has a text configuration but no shape, so it cannot be rebuilt and is dropped even with KeepEmptyText.
+    ModelVolume* shapeless = object->add_volume(TriangleMesh(its_make_cube(3., 3., 3.)));
+    shapeless->name = "shapeless";
+    shapeless->text_configuration = TextConfiguration{};
+    shapeless->text_configuration->text = "Orca";
+    shapeless->text_configuration->style.type = EmbossStyle::Type::file_path;
+
+    object->add_instance();
+
+    ScopedTemporaryFile temp(".3mf");
+    const std::string path = temp.string();
+    DynamicPrintConfig cfg;
+    StoreParams sp;
+    sp.path     = path.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel;
+    REQUIRE(store_bbs_3mf(sp));
+
+    const bool stripped = rewrite_3mf_entries(path, [](std::string& name, std::string& data) {
+        if (!boost::algorithm::starts_with(name, "3D/Objects/"))
+            return false;
+        const size_t begin = data.find("<mesh>");
+        const size_t end   = data.find("</mesh>");
+        REQUIRE(end != std::string::npos);
+        data.replace(begin, end - begin, "<mesh><vertices/><triangles/>");
+        return true;
+    });
+    REQUIRE(stripped);
+
+    SECTION("with KeepEmptyText the object loads with one empty text volume") {
+        ScopedTemporaryDir dst_backup_dir("orca_empty_text_object_dst");
+        Model dst;
+        REQUIRE(load_project(path, dst, dst_backup_dir, LoadStrategy::KeepEmptyText));
+        REQUIRE(dst.objects.size() == 1);
+        REQUIRE(dst.objects.front()->volumes.size() == 1);
+        const ModelVolume* loaded = dst.objects.front()->volumes.front();
+        REQUIRE(loaded->mesh().empty());
+        REQUIRE(loaded->text_configuration.has_value());
+        REQUIRE(loaded->text_configuration->text == "Orca");
+    }
+
+    SECTION("without KeepEmptyText the object has no volumes") {
+        ScopedTemporaryDir dst_backup_dir("orca_empty_text_object_dst");
+        Model dst;
+        REQUIRE(load_project(path, dst, dst_backup_dir));
+        REQUIRE(dst.objects.size() == 1);
+        REQUIRE(dst.objects.front()->volumes.empty());
     }
 }

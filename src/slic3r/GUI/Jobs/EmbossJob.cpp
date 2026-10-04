@@ -925,7 +925,7 @@ std::string RebuildTextsResult::warning_text() const
             message += "\n- " + name;
     };
     append_section(placeholder, _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:"));
-    append_section(similar_font, _u8L("The font of some text parts is not installed. A similar font is used for:"));
+    append_section(similar_font, _u8L("The font of some text parts is not available. A similar font is used for:"));
     append_section(flat_fallback, _u8L("Some text parts had no surface to project onto. They are flat until re-embossed:"));
     return message;
 }

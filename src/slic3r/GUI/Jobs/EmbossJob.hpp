@@ -253,7 +253,7 @@ struct RebuildTextsResult
 {
     // Can't create the text from its font, a placeholder mesh is used
     std::vector<std::string> placeholder;
-    // Rebuilt with a similar font, because the stored one is not installed
+    // Rebuilt with a similar font, because the stored one can't be loaded
     std::vector<std::string> similar_font;
     // Use-surface text with no surface to project onto is created flat, use_surface is kept
     std::vector<std::string> flat_fallback;

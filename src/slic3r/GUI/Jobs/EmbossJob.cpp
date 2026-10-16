@@ -55,6 +55,7 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/Utils/EmbossStyleManager.hpp"
 #include "slic3r/Utils/WxFontUtils.hpp"
 
 #include <wx/fontenum.h>
@@ -821,7 +822,9 @@ TriangleMesh create_mesh_blocking(DataBase &input, const ModelVolume &volume, co
                 try {
                     if (TriangleMesh mesh = ::cut_surface(input, surface, was_canceled); !mesh.empty())
                         return mesh;
-                } catch (const JobException &e) {
+                } catch (const std::bad_alloc &) {
+                    throw;
+                } catch (const std::exception &e) {
                     BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\": " << e.what();
                 }
             }
@@ -901,6 +904,9 @@ void rebuild_text_mesh(ModelVolume &text_volume, StyleManager &style_manager, Re
 
 RebuildTextsResult rebuild_missing_text_meshes(Model &model)
 {
+    if (std::none_of(model.objects.begin(), model.objects.end(),
+                     [](const ModelObject *object) { return !missing_text_volumes_in_rebuild_order(*object).empty(); }))
+        return {};
     // Only loads fonts by style: no AppConfig, ImGui font or default styles are needed.
     StyleManager style_manager(nullptr, {});
     RebuildTextsResult result;

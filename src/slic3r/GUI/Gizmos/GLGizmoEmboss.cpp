@@ -176,21 +176,6 @@ CreateVolumeParams create_input(GLCanvas3D &canvas, const StyleManager::Style &s
 /// </summary>
 ImVec2 calc_fine_position(const Selection &selection, const ImVec2 &windows_size, const Size &canvas_size);
 
-struct TextDataBase : public DataBase
-{
-    TextDataBase(DataBase &&parent, const FontFileWithCache &font_file, 
-        TextConfiguration &&text_configuration, const EmbossProjection& projection);
-    // Create shape from text + font configuration
-    EmbossShape &create_shape() override;
-    void write(ModelVolume &volume) const override;
-
-private:
-    //  Keep pointer on Data of font (glyph shapes)
-    FontFileWithCache m_font_file;
-    // font item is not used for create object
-    TextConfiguration m_text_configuration;
-};
-
 // Loaded icons enum
 // Have to match order of files in function GLGizmoEmboss::init_icons()
 enum class IconType : unsigned {
@@ -431,27 +416,6 @@ bool GLGizmoEmboss::re_emboss(const ModelVolume &text_volume, std::shared_ptr<st
     RaycastManager raycast_manager; // Nothing is cached now, so It need to create raycasters
     return start_update_volume(std::move(data), text_volume, selection, raycast_manager);
 }
-
-namespace{
-ModelVolumePtrs prepare_volumes_to_slice(const ModelVolume &mv)
-{
-    const ModelVolumePtrs &volumes = mv.get_object()->volumes;
-    ModelVolumePtrs        result;
-    result.reserve(volumes.size());
-    for (ModelVolume *volume : volumes) {
-        // only part could be surface for volumes
-        if (!volume->is_model_part())
-            continue;
-
-        // is selected volume
-        if (mv.id() == volume->id())
-            continue;
-
-        result.push_back(volume);
-    }
-    return result;
-}
-} // namespace
 
 bool GLGizmoEmboss::do_mirror(size_t axis)
 { 
@@ -1099,48 +1063,23 @@ EmbossStyles GLGizmoEmboss::create_default_styles()
 namespace {
 
 /// <summary>
-/// Check installed fonts whether optional face name exist in installed fonts
+/// Check installed fonts whether optional face name exist in installed fonts, see Emboss::get_installed_face_name()
 /// </summary>
-/// <param name="face_name_opt">Name from style - style.prop.face_name</param>
 /// <param name="face_names">All installed good and bad fonts - not const must be possible to initialize it</param>
-/// <returns>When it could be installed it contain value(potentionaly empty string)</returns>
 std::optional<wxString> get_installed_face_name(const std::optional<std::string> &face_name_opt, ::Facenames& face_names)
 {
-    // Could exist OS without getter on face_name,
-    // but it is able to restore font from descriptor
-    // Soo default value must be TRUE
-    if (!face_name_opt.has_value())
-        return wxString();
-
-    wxString face_name = wxString::FromUTF8(face_name_opt->c_str());
-
-    // search in enumerated fonts
-    // refresh list of installed font in the OS.
-    init_face_names(face_names);
-    face_names.is_init = false;
-
-    auto cmp = [](const FaceName &fn, const wxString &wx_name) { return fn.wx_name < wx_name; };
-    const std::vector<FaceName> &faces = face_names.faces;    
-    // is font installed?
-    if (auto it = std::lower_bound(faces.begin(), faces.end(), face_name, cmp);
-        it != faces.end() && it->wx_name == face_name)
-        return face_name;
-
-    const std::vector<wxString> &bad = face_names.bad;
-    auto it_bad = std::lower_bound(bad.begin(), bad.end(), face_name);
-    if (it_bad == bad.end() || *it_bad != face_name) {
-        // check if wx allowed to set it up - another encoding of name
-        wxFontEnumerator::InvalidateCache();
-        wxFont wx_font_;                                                                          // temporary structure
-        if (wx_font_.SetFaceName(face_name) && WxFontUtils::create_font_file(wx_font_) != nullptr // can load TTF file?
-        ) {
-            return wxString();
-            // QUESTION: add this name to allowed faces?
-            // Could create twin of font face name
-            // When not add it will be hard to select it again when change font
-        }
+    if (face_name_opt.has_value()) {
+        // refresh list of installed font in the OS.
+        init_face_names(face_names);
+        face_names.is_init = false;
     }
-    return {}; // not installed    
+    // search in enumerated fonts
+    auto is_enumerated = [&faces = face_names.faces](const wxString &face_name) {
+        auto cmp = [](const FaceName &fn, const wxString &wx_name) { return fn.wx_name < wx_name; };
+        auto it = std::lower_bound(faces.begin(), faces.end(), face_name, cmp);
+        return it != faces.end() && it->wx_name == face_name;
+    };
+    return Slic3r::GUI::Emboss::get_installed_face_name(face_name_opt, is_enumerated, face_names.bad);
 }
 
 void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* const*/ StyleManager &style_manager, unsigned count_lines)
@@ -1154,34 +1093,17 @@ void init_text_lines(TextLinesModel &text_lines, const Selection& selection, /* 
     if (mv_ptr == nullptr)
         return;
     const ModelVolume &mv = *mv_ptr;
-    if (mv.is_the_only_one_part())
-        return;
 
     const std::optional<EmbossShape> &es_opt = mv.emboss_shape;
     if (!es_opt.has_value())
         return;
     const EmbossShape &es = *es_opt;
 
-    const std::optional<TextConfiguration> &tc_opt = mv.text_configuration;
-    if (!tc_opt.has_value())
-        return;
-    const TextConfiguration &tc = *tc_opt;
-
-    // calculate count lines when not set
-    if (count_lines == 0) {
-        count_lines = get_count_lines(tc.text);
-        if (count_lines == 0)
-            return;
-    }
-
-    // prepare volumes to slice
-    ModelVolumePtrs volumes = prepare_volumes_to_slice(mv);
-
     // For interactivity during drag over surface it must be from gl_volume not volume.
     Transform3d mv_trafo = gl_volume.get_volume_transformation().get_matrix();
     if (es.fix_3mf_tr.has_value())
         mv_trafo = mv_trafo * (es.fix_3mf_tr->inverse());
-    text_lines.init(mv_trafo, volumes, style_manager, count_lines);
+    init_volume_text_lines(text_lines, mv, mv_trafo, style_manager, count_lines);
 }
 }
 
@@ -1227,28 +1149,8 @@ void GLGizmoEmboss::set_volume_by_selection()
     const TextConfiguration &tc = *tc_opt;
     const EmbossStyle    &style = tc.style;
 
-    std::optional<wxString> installed_name = get_installed_face_name(style.prop.face_name, *m_face_names);
-
-    wxFont wx_font;
-    // load wxFont from same OS when font name is installed
-    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
-        wx_font = WxFontUtils::load_wxFont(style.path);
-
-    // Flag that is selected same font
-    bool is_exact_font = true;
-    // Different OS or try found on same OS
-    if (!wx_font.IsOk()) {
-        is_exact_font = false;
-        // Try create similar wx font by FontFamily
-        wx_font = WxFontUtils::create_wxFont(style);
-        if (installed_name.has_value() && !installed_name->empty())
-            is_exact_font = wx_font.SetFaceName(*installed_name);
-
-        // Have to use some wxFont
-        if (!wx_font.IsOk())
-            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-    }
-    assert(wx_font.IsOk());
+    const LoadedWxFont loaded_font = load_wx_font(style, get_installed_face_name(style.prop.face_name, *m_face_names));
+    const wxFont &wx_font = loaded_font.font;
 
     // Load style to style manager
     const auto &styles = m_style_manager.get_styles();
@@ -1277,7 +1179,7 @@ void GLGizmoEmboss::set_volume_by_selection()
         }
     }
     
-    if (!is_exact_font)
+    if (!loaded_font.is_exact)
         create_notification_not_valid_font(tc);
 
     // cancel previous job
@@ -3385,42 +3287,6 @@ bool draw_button(const IconManager::VIcons &icons, IconType type, bool disable){
         get_icon(icons, type, IconState::hovered),
         get_icon(icons, type, IconState::disabled),
         disable);}
-
-TextDataBase::TextDataBase(DataBase               &&parent,
-                           const FontFileWithCache &font_file,
-                           TextConfiguration      &&text_configuration,
-                           const EmbossProjection  &projection)
-    : DataBase(std::move(parent)), m_font_file(font_file) /* copy */, m_text_configuration(std::move(text_configuration))
-{
-    assert(m_font_file.has_value());
-    shape.projection = projection; // copy
-
-    const FontProp &fp = m_text_configuration.style.prop;
-    const FontFile &ff = *m_font_file.font_file;
-    shape.scale = get_text_shape_scale(fp, ff);
-}
-
-EmbossShape &TextDataBase::create_shape()
-{
-    if (!shape.shapes_with_ids.empty())
-        return shape;
-
-    // create shape by configuration
-    const char *text = m_text_configuration.text.c_str();
-    std::wstring text_w = boost::nowide::widen(text);
-    const FontProp &fp = m_text_configuration.style.prop;
-    auto was_canceled = [&c = cancel](){ return c->load(); };
-
-    shape.shapes_with_ids = text2vshapes(m_font_file, text_w, fp, was_canceled);
-    return shape;
-}
-
-void TextDataBase::write(ModelVolume &volume) const
-{
-    DataBase::write(volume);
-    volume.text_configuration = m_text_configuration; // copy
-    assert(volume.emboss_shape.has_value());
-}
 
 std::unique_ptr<DataBase> create_emboss_data_base(const std::string                  &text,
                                        StyleManager                       &style_manager,

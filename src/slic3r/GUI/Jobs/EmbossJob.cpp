@@ -1,5 +1,7 @@
 #include "EmbossJob.hpp"
 
+#include <libslic3r/TextConfiguration.hpp>
+#include <atomic>
 #include <optional>
 #include "libslic3r/Point.hpp"
 #include "slic3r/GUI/Jobs/Job.hpp"
@@ -24,10 +26,12 @@
 #include <limits>
 #include <algorithm>
 #include <cstdint>
+#include <slic3r/GUI/TextLines.hpp>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/convert.hpp>
 
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Format/OBJ.hpp> // load_obj for default mesh
@@ -55,6 +59,12 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/Utils/EmbossStyleManager.hpp"
+#include "slic3r/Utils/WxFontUtils.hpp"
+
+#include <wx/font.h>
+#include <wx/fontenum.h>
+#include <wx/settings.h>
 
 namespace Slic3r { class GLVolume; }
 
@@ -709,6 +719,142 @@ bool start_update_volume(DataUpdate &&data, const ModelVolume &volume, const Sel
     // Run Job on main thread (blocking) - ONLY DEBUG
     return execute_job(std::move(job));
 #endif // EXECUTE_UPDATE_ON_MAIN_THREAD
+}
+
+std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &mv)
+{
+    const ModelVolumePtrs &volumes = mv.get_object()->volumes;
+    std::vector<ModelVolume *> result;
+    result.reserve(volumes.size());
+    for (ModelVolume *volume : volumes) {
+        // only part could be surface for volumes
+        if (!volume->is_model_part())
+            continue;
+
+        // is selected volume
+        if (mv.id() == volume->id())
+            continue;
+
+        result.push_back(volume);
+    }
+    return result;
+}
+
+void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines)
+{
+    if (mv.is_the_only_one_part())
+        return;
+
+    const std::optional<TextConfiguration> &tc_opt = mv.text_configuration;
+    if (!tc_opt.has_value())
+        return;
+    const TextConfiguration &tc = *tc_opt;
+
+    // calculate count lines when not set
+    if (count_lines == 0) {
+        count_lines = get_count_lines(tc.text);
+        if (count_lines == 0)
+            return;
+    }
+
+    // prepare volumes to slice
+    std::vector<ModelVolume *> volumes = prepare_volumes_to_slice(mv);
+    text_lines.init(volume_tr, volumes, style_manager, count_lines);
+}
+
+LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name)
+{
+    wxFont wx_font;
+    // load wxFont from same OS when font name is installed
+    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
+        wx_font = WxFontUtils::load_wxFont(style.path);
+
+    // Flag that is selected same font
+    bool is_exact_font = true;
+    // Different OS or try found on same OS
+    if (!wx_font.IsOk()) {
+        is_exact_font = false;
+        // Try create similar wx font by FontFamily
+        wx_font = WxFontUtils::create_wxFont(style);
+        if (installed_name.has_value() && !installed_name->empty())
+            is_exact_font = wx_font.SetFaceName(*installed_name);
+
+        // Have to use some wxFont
+        if (!wx_font.IsOk())
+            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    }
+    assert(wx_font.IsOk());
+    return {wx_font, is_exact_font};
+}
+
+std::optional<wxString> get_installed_face_name(const std::optional<std::string>          &face_name_opt,
+                                                const std::function<bool(const wxString &)> &is_enumerated,
+                                                const std::vector<wxString>                 &bad,
+                                                bool                                         invalidate_cache)
+{
+    // Could exist OS without getter on face_name,
+    // but it is able to restore font from descriptor
+    // Soo default value must be TRUE
+    if (!face_name_opt.has_value())
+        return wxString();
+
+    wxString face_name = wxString::FromUTF8(face_name_opt->c_str());
+
+    // is font installed?
+    if (is_enumerated(face_name))
+        return face_name;
+
+    auto it_bad = std::lower_bound(bad.begin(), bad.end(), face_name);
+    if (it_bad == bad.end() || *it_bad != face_name) {
+        // check if wx allowed to set it up - another encoding of name
+        if (invalidate_cache)
+            wxFontEnumerator::InvalidateCache();
+        wxFont wx_font_;                                                                          // temporary structure
+        if (wx_font_.SetFaceName(face_name) && WxFontUtils::create_font_file(wx_font_) != nullptr // can load TTF file?
+        ) {
+            return wxString();
+            // QUESTION: add this name to allowed faces?
+            // Could create twin of font face name
+            // When not add it will be hard to select it again when change font
+        }
+    }
+    return {}; // not installed
+}
+
+TextDataBase::TextDataBase(DataBase               &&parent,
+                           const FontFileWithCache &font_file,
+                           TextConfiguration      &&text_configuration,
+                           const EmbossProjection  &projection)
+    : DataBase(std::move(parent)), m_font_file(font_file) /* copy */, m_text_configuration(std::move(text_configuration))
+{
+    assert(m_font_file.has_value());
+    shape.projection = projection; // copy
+
+    const FontProp &fp = m_text_configuration.style.prop;
+    const FontFile &ff = *m_font_file.font_file;
+    shape.scale = get_text_shape_scale(fp, ff);
+}
+
+EmbossShape &TextDataBase::create_shape()
+{
+    if (!shape.shapes_with_ids.empty())
+        return shape;
+
+    // create shape by configuration
+    const char *text = m_text_configuration.text.c_str();
+    std::wstring text_w = boost::nowide::widen(text);
+    const FontProp &fp = m_text_configuration.style.prop;
+    auto was_canceled = [&c = cancel](){ return c->load(); };
+
+    shape.shapes_with_ids = text2vshapes(m_font_file, text_w, fp, was_canceled);
+    return shape;
+}
+
+void TextDataBase::write(ModelVolume &volume) const
+{
+    DataBase::write(volume);
+    volume.text_configuration = m_text_configuration; // copy
+    assert(volume.emboss_shape.has_value());
 }
 
 } // namespace Slic3r::GUI::Emboss

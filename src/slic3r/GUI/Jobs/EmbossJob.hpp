@@ -27,6 +27,8 @@
 namespace Slic3r {
 class TriangleMesh;
 class ModelVolume;
+class Model;
+class ModelObject;
 enum class ModelVolumeType : int;
 class BuildVolume;
 namespace GUI {
@@ -258,6 +260,39 @@ std::optional<wxString> get_installed_face_name(const std::optional<std::string>
                                                 const std::function<bool(const wxString &)> &is_enumerated,
                                                 const std::vector<wxString>                 &bad              = {},
                                                 bool                                         invalidate_cache = true);
+
+/// <summary>
+/// Names of volumes which could not be rebuilt exactly or were removed, see rebuild_missing_text_meshes()
+/// </summary>
+struct RebuildTextsResult
+{
+    // Can't create the text from its font, a placeholder mesh is used
+    std::vector<std::string> placeholder;
+    // Rebuilt with a similar font, because the stored one can't be loaded
+    std::vector<std::string> similar_font;
+    // Use-surface text that can't be projected onto a surface is created flat, use_surface is kept
+    std::vector<std::string> flat_fallback;
+    // Still without a mesh after the rebuild, removed from the model with any object left without volumes
+    std::vector<std::string> removed;
+
+    // Add the names of another rebuild, e.g. of the next file loaded together
+    void append(const RebuildTextsResult &other);
+    // Message for the user, empty when there is nothing to warn about
+    std::string warning_text() const;
+};
+
+/// <summary>
+/// Text volumes of the object without a mesh: flat ones first, since projected ones need the other parts' meshes.
+/// </summary>
+std::vector<ModelVolume *> missing_text_volumes_in_rebuild_order(const ModelObject &object);
+
+/// <summary>
+/// Rebuild, on the calling thread, the mesh of every text volume that has none, e.g. one loaded from .3mf with
+/// LoadStrategy::KeepEmptyText. See docs/HLSD/3mf-text-parts.md.
+/// </summary>
+/// <param name="was_canceled">Called before each text. When it returns true, the rebuild stops and leaves the
+/// model partly rebuilt, with volumes still without a mesh, for the caller to discard.</param>
+RebuildTextsResult rebuild_missing_text_meshes(Model &model, const std::function<bool()> &was_canceled = {});
 
 /// <summary>
 /// shorten params for start_crate_volume functions

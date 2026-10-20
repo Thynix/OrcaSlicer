@@ -373,6 +373,12 @@ enum class ModelVolumeType : int {
 inline bool is_precise_seam(ModelVolumeType t)       { return t >= ModelVolumeType::PRECISE_SEAM_CENTER && t <= ModelVolumeType::PRECISE_SEAM_NEUTRAL; }
 inline bool is_precise_seam_strong(ModelVolumeType t) { return t >= ModelVolumeType::PRECISE_SEAM_CENTER && t <= ModelVolumeType::PRECISE_SEAM_RIGHT; }
 inline bool is_precise_seam_weak(ModelVolumeType t)   { return t >= ModelVolumeType::PRECISE_SEAM_ENFORCED && t <= ModelVolumeType::PRECISE_SEAM_NEUTRAL; }
+// Types the emboss gizmo creates text as, the only ones a text part loaded without a mesh is rebuilt for.
+// A hand-edited or corrupted 3mf could attach text to e.g. a support blocker (issues #5070, #13120).
+inline bool is_text_volume_type(ModelVolumeType t)
+{
+    return t == ModelVolumeType::MODEL_PART || t == ModelVolumeType::NEGATIVE_VOLUME || t == ModelVolumeType::PARAMETER_MODIFIER;
+}
 
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
@@ -1038,6 +1044,11 @@ public:
 	bool                is_precise_seam_weak()   const { return Slic3r::is_precise_seam_weak(m_type); }
     bool                is_text()               const { return text_configuration.has_value(); }
     bool                is_svg() const { return emboss_shape.has_value()  && !text_configuration.has_value(); }
+    // Text without a mesh to rebuild from its text and font, see LoadStrategy::KeepEmptyText
+    bool                is_missing_text_mesh() const
+    {
+        return mesh().empty() && text_configuration.has_value() && emboss_shape.has_value() && is_text_volume_type(m_type);
+    }
     bool                is_the_only_one_part() const; // behave like an object
     t_model_material_id material_id() const { return m_material_id; }
     void                set_material_id(t_model_material_id material_id);

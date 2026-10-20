@@ -248,6 +248,7 @@
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
+#include "Jobs/EmbossJob.hpp" // Rebuild text loaded without mesh
 #include "Gizmos/GizmoObjectManipulation.hpp"
 
 // BBS
@@ -8986,6 +8987,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
     auto *new_model = (!load_model || one_by_one) ? nullptr : new Slic3r::Model();
     std::vector<size_t> obj_idxs;
+    // Text parts rebuilt in all loaded files, warned about in one notification after the loop:
+    // the notification is single-instance, so one per file would replace the previous.
+    Emboss::RebuildTextsResult rebuilt_texts;
 
     std::string  designer_model_id;
     std::string  designer_country_code;
@@ -9060,6 +9064,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
         if (load_config) strategy = strategy | LoadStrategy::CheckVersion;
         bool is_project_file = false;
+        // Added to rebuilt_texts only once the file has loaded, so a file that fails later isn't warned about
+        Emboss::RebuildTextsResult file_rebuilt_texts;
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": is_project_file %1%, type_3mf %2%") % is_project_file % type_3mf;
         try {
             if (type_3mf) {
@@ -9080,7 +9086,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     std::vector<Preset *>     project_presets;
                     // BBS: backup & restore
                     q->skip_thumbnail_invalid = true;
-                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type, strategy, &plate_data, &project_presets,
+                    // KeepEmptyText: text parts without a mesh are rebuilt below.
+                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type,
+                                                             strategy | LoadStrategy::KeepEmptyText, &plate_data, &project_presets,
                                                              &file_version,
                                                              [&dlg, real_filename, &progress_percent, stage_percent, INPUT_FILES_RATIO, total_files, i,
                                                               &is_user_cancel](int import_stage, int current, int total, bool &cancel) {
@@ -9771,6 +9779,21 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     }
                     if (!silence) wxGetApp().app_config->update_config_dir(path.parent_path().string());
                 }
+
+                // Text parts stored without a mesh are rebuilt before the model is validated and placed,
+                // also for a geometry-only import, which has no other way to get their mesh.
+                // The warning is shown once after all files are loaded, see below.
+                // Updating the dialog before each text lets its Cancel button through.
+                file_rebuilt_texts = Emboss::rebuild_missing_text_meshes(model, [&dlg, &dlg_cont, &progress_percent]() {
+                    dlg_cont = dlg.Update(progress_percent);
+                    return !dlg_cont;
+                });
+                if (!dlg_cont) {
+                    q->skip_thumbnail_invalid = false;
+                    if (new_model)
+                        delete new_model;
+                    return empty_result;
+                }
             } else {
                 // BBS: add plate data related logic
                 PlateDataPtrs plate_data;
@@ -9890,6 +9913,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 GUI::show_error(q, e.what());
             continue;
         }
+        rebuilt_texts.append(file_rebuilt_texts);
 
         progress_percent = 100.0f * (float)i / (float)total_files + INIT_MODEL_RATIO * 100.0f / (float)total_files;
         dlg_cont = dlg.Update(progress_percent);
@@ -10085,6 +10109,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             }
         }
     }
+
+    // A type of its own: the 3mf and plate-info warnings are closed by validation, arranging or the Preview.
+    if (const std::string message = rebuilt_texts.warning_text(); !message.empty())
+        q->get_notification_manager()->push_notification(NotificationType::RebuiltTextWarning,
+                                                         NotificationManager::NotificationLevel::WarningNotificationLevel, message);
 
     if (new_model != nullptr && new_model->objects.size() > 1) {
         //BBS do not popup this dialog

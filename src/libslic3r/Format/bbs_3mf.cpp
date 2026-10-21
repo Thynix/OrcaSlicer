@@ -988,7 +988,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             MetadataList metadata;
             VolumeMetadataList volumes;
-            bool auto_drop { true };
+            std::optional<bool> auto_drop;
         };
 
         struct CutObjectInfo
@@ -1167,6 +1167,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_load_model = false;
         bool m_load_aux = false;
         bool m_load_config = false;
+        bool m_keep_empty_text = false;
         // backup & restore
         bool m_load_restore = false;
         std::string m_backup_path;
@@ -1208,6 +1209,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //IdToGeometryMap m_orig_geometries; // backup & restore
         CurrentConfig m_curr_config;
         IdToMetadataMap m_objects_metadata;
+        std::set<int>   m_items_auto_drop_off; // object ids with a build item auto_drop="0" (2.4.x layout)
         IdToCutObjectInfoMap       m_cut_object_infos;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
@@ -1463,6 +1465,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_objects.clear();
         m_instances.clear();
         m_objects_metadata.clear();
+        m_items_auto_drop_off.clear();
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
 
@@ -1490,6 +1493,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_load_aux = strategy & LoadStrategy::LoadAuxiliary;
         m_load_restore = strategy & LoadStrategy::Restore;
         m_load_config = strategy & LoadStrategy::LoadConfig;
+        m_keep_empty_text = strategy & LoadStrategy::KeepEmptyText;
         m_model = &model;
         m_unit_factor = 1.0f;
         m_curr_object = nullptr;
@@ -1502,6 +1506,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_curr_config.object_id = -1;
         m_curr_config.volume_id = -1;
         m_objects_metadata.clear();
+        m_items_auto_drop_off.clear();
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
         m_brim_ear_points.clear();
@@ -2257,11 +2262,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             ObjectMetadata::VolumeMetadataList volumes;
             ObjectMetadata::VolumeMetadataList* volumes_ptr = nullptr;
 
+            // 2.4.x stored auto_drop on build items, shared by all instances of an object; any "off" wins
+            const bool legacy_auto_drop = !m_items_auto_drop_off.count(object.first.second);
+
             IdToMetadataMap::iterator obj_metadata = m_objects_metadata.find(object.first.second);
             if (obj_metadata != m_objects_metadata.end()) {
                 // config data has been found, this model was saved using slic3r pe
 
-                model_object->auto_drop = obj_metadata->second.auto_drop;
+                model_object->auto_drop = obj_metadata->second.auto_drop.value_or(legacy_auto_drop);
 
                 // apply object's name and config data
                 for (const Metadata& metadata : obj_metadata->second.metadata) {
@@ -2279,6 +2287,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else {
                 // config data not found, this model was not saved using slic3r pe
+                model_object->auto_drop = legacy_auto_drop;
 
                 // add the entire geometry as the single volume to generate
                 //volumes.emplace_back(0, (int)obj_geometry->second.triangles.size() - 1);
@@ -4121,6 +4130,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         std::string path = bbs_get_attribute_value_string(attributes, num_attributes, PPATH_ATTR);
         Transform3d transform = bbs_get_transform_from_3mf_specs_string(bbs_get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
         int printable = bbs_get_attribute_value_bool(attributes, num_attributes, PRINTABLE_ATTR);
+        if (const char* auto_drop = bbs_get_attribute_value_charptr(attributes, num_attributes, AUTO_DROP_ATTR); auto_drop != nullptr && !::atoi(auto_drop))
+            m_items_auto_drop_off.insert(object_id);
         return !m_load_model || _create_object_instance(path, object_id, transform, printable, 1);
     }
 
@@ -4489,7 +4500,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // int instances_count_id = bbs_get_attribute_value_int(attributes, num_attributes, INSTANCESCOUNT_ATTR);
 
         ObjectMetadata metadata;
-        metadata.auto_drop = bbs_get_attribute_value_bool(attributes, num_attributes, AUTO_DROP_ATTR);
+        if (bbs_get_attribute_value_charptr(attributes, num_attributes, AUTO_DROP_ATTR) != nullptr)
+            metadata.auto_drop = bbs_get_attribute_value_bool(attributes, num_attributes, AUTO_DROP_ATTR);
         m_objects_metadata.insert({ object_id, std::move(metadata) });
         m_curr_config.object_id = object_id;
         return true;
@@ -5189,10 +5201,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         id_list.push_back(std::pair(comp, current_item.second * comp.transform));
                     }
                 }
-                else if (!(current_object->second.geometry.empty())) {
+                else if (m_keep_empty_text || !current_object->second.geometry.empty()) {
                     //CurrentObject* ptr = &(current_objects[current_id]);
                     //CurrentObject* ptr2 = &(current_object->second);
+                    // See LoadStrategy::KeepEmptyText. Volume metadata is not parsed yet, so all empty leaves pass here
+                    // and _generate_volumes_new() drops those that are not text.
                     sub_objects.push_back({ current_object->first, current_item.second});
+                }
+                else {
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": dropping object %1% without triangles") % current_object->first.second;
                 }
             }
         }
@@ -5280,12 +5297,28 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             }
 
-            const size_t triangles_count = sub_object->geometry.triangles.size();
-            if (triangles_count == 0) {
-                add_error("found no trianges in the object " + std::to_string(sub_object->id));
-                return false;
+            // A text part without a mesh is loaded empty; the caller rebuilds it from its text and font.
+            // Its final type is only known after the metadata below, which checks it again.
+            const bool empty_recoverable = m_keep_empty_text && sub_object->geometry.empty() &&
+                volume_data->text_configuration.has_value() && volume_data->shape_configuration.has_value();
+            // Painting of triangles left without vertices would land on unrelated triangles of the rebuilt mesh.
+            const size_t triangles_count = empty_recoverable ? 0 : sub_object->geometry.triangles.size();
+            if (sub_object->geometry.empty() && !empty_recoverable) {
+                // Only reachable with KeepEmptyText: no triangles and no text to rebuild them from.
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": dropping object %1% without triangles") % sub_object->id;
+                continue;
             }
-            if (!shared_volume){
+
+            if (shared_volume) {
+                // A real mesh is already loaded for this id; reuse it even if this sub-object's own
+                // geometry is empty (e.g. a text part sharing a mesh is stripped to save space).
+                volume = object.add_volume_with_shared_mesh(*shared_volume);
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": line %1%, create volume using shared_mesh %2%")%__LINE__%shared_volume;
+            }
+            else if (empty_recoverable) {
+                volume = object.add_volume(TriangleMesh(), ModelVolumeType::MODEL_PART, false);
+            }
+            else {
                 // splits volume out of imported geometry
                 indexed_triangle_set its;
                 its.indices.assign(sub_object->geometry.triangles.begin(), sub_object->geometry.triangles.end());
@@ -5341,11 +5374,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     m_shared_meshes[shared_mesh_id] = volume;
                 else
                     m_shared_meshes[sub_object->id] = volume;
-            }
-            else {
-                //create volume to use shared mesh
-                volume = object.add_volume_with_shared_mesh(*shared_volume);
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": line %1%, create volume using shared_mesh %2%")%__LINE__%shared_volume;
             }
             // stores the volume matrix taken from the metadata, if present
             if (has_transform)
@@ -5404,9 +5432,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             volume->set_type(volume_data->part_type);
-            
-            if (auto &es = volume_data->shape_configuration; es.has_value())
-                volume->emboss_shape = std::move(es);            
+
+            // Without a mesh, the component transform is the text frame, so a stored fix_3mf_tr
+            // must not be applied, see docs/HLSD/3mf-text-parts.md.
+            if (auto &es = volume_data->shape_configuration; es.has_value()) {
+                volume->emboss_shape = std::move(es);
+                if (empty_recoverable)
+                    volume->emboss_shape->fix_3mf_tr.reset();
+            }
             if (auto &tc = volume_data->text_configuration; tc.has_value())
                 volume->text_configuration = std::move(tc);
 
@@ -5463,6 +5496,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             volume->config.set_deserialize(key, metadata.value, config_substitutions);
                     }
                 }
+            }
+
+            if (empty_recoverable && !volume->is_missing_text_mesh()) {
+                // Text on a type text is not created as, e.g. a support blocker: no rebuild path for it.
+                // Just added, so it is the last volume. Not delete_volume(), which would collapse the transform
+                // of a remaining single volume into the instances.
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": dropping text object %1% without triangles of type %2%") % sub_object->id % int(volume->type());
+                auto it = std::find(object.volumes.begin(), object.volumes.end(), volume);
+                assert(it != object.volumes.end());
+                delete volume;
+                if (it != object.volumes.end())
+                    object.volumes.erase(it);
+                continue;
             }
 
             // this may happen for 3mf saved by 3rd part softwares
@@ -10110,7 +10156,7 @@ bool to_xml(std::stringstream &stream, const EmbossShape::SvgFile &svg, const Mo
     assert(file_data != nullptr);
     if (file_data == nullptr && !svg.path.empty()) file_data = read_from_disk(svg.path);
     if (file_data == nullptr) {
-        BOOST_LOG_TRIVIAL(warning) << "Can't write svg file no filedata";
+        BOOST_LOG_TRIVIAL(warning) << "Can't write SVG file no filedata";
         return false;
     }
     const std::string &file_data_str = *file_data; 
@@ -10126,7 +10172,7 @@ void to_xml(std::stringstream &stream, const EmbossShape &es, const ModelVolume 
     stream << "   <" << SHAPE_TAG << " ";
     if (es.svg_file.has_value())
         if (!to_xml(stream, *es.svg_file, volume, archive, export_full_path)) {
-            BOOST_LOG_TRIVIAL(warning) << "Can't write svg file defiden embossed shape into 3mf";
+            BOOST_LOG_TRIVIAL(warning) << "Can't write SVG file defiden embossed shape into 3mf";
         }
 
     stream << SHAPE_SCALE_ATTR << "=\"" << es.scale << "\" ";

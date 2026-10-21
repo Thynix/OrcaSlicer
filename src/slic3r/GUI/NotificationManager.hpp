@@ -145,6 +145,8 @@ enum class NotificationType
 	SimplifySuggestion,
 	// Change of text will change font to similar one on.
 	UnknownFont,
+	// Text parts loaded from a project without a mesh that could not be rebuilt exactly, see Emboss::rebuild_missing_text_meshes()
+	RebuiltTextWarning,
 	// information about cgal is finished repairing model (blocking process)
 	CgalFinished,
 	// Short meesage to fill space between start and finish of export

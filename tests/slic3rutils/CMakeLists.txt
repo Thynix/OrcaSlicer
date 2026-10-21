@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     test_web_media_controller.cpp
     test_scene_raycaster.cpp
     test_scene_benchmark.cpp
+    test_emboss_rebuild.cpp
     test_lazy.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp
@@ -44,6 +45,7 @@ add_executable(${_TEST_NAME}_tests
     test_shortcuts.cpp
     test_texture_color_palette.cpp
     test_texture_island_view.cpp
+    test_timelapse_codecs.cpp
     test_file_url.cpp
     test_imgui_wrapper.cpp
     test_user_manager.cpp

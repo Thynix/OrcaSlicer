@@ -1,5 +1,8 @@
 #include "EmbossJob.hpp"
 
+#include <libslic3r/TextConfiguration.hpp>
+#include <new>
+#include <atomic>
 #include <optional>
 #include "libslic3r/Point.hpp"
 #include "slic3r/GUI/Jobs/Job.hpp"
@@ -21,13 +24,21 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include <functional>
+#include <initializer_list>
 #include <limits>
+#include <map>
 #include <algorithm>
 #include <cstdint>
+#include <slic3r/GUI/TextLines.hpp>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <tuple>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/convert.hpp>
+#include <boost/system/error_code.hpp>
 
 #include <libslic3r/Model.hpp>
 #include <libslic3r/Format/OBJ.hpp> // load_obj for default mesh
@@ -55,6 +66,12 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosManager.hpp"
 #include "slic3r/GUI/I18N.hpp"
+#include "slic3r/Utils/EmbossStyleManager.hpp"
+#include "slic3r/Utils/WxFontUtils.hpp"
+
+#include <wx/font.h>
+#include <wx/fontenum.h>
+#include <wx/settings.h>
 
 namespace Slic3r { class GLVolume; }
 
@@ -709,6 +726,432 @@ bool start_update_volume(DataUpdate &&data, const ModelVolume &volume, const Sel
     // Run Job on main thread (blocking) - ONLY DEBUG
     return execute_job(std::move(job));
 #endif // EXECUTE_UPDATE_ON_MAIN_THREAD
+}
+
+std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &mv)
+{
+    const ModelVolumePtrs &volumes = mv.get_object()->volumes;
+    std::vector<ModelVolume *> result;
+    result.reserve(volumes.size());
+    for (ModelVolume *volume : volumes) {
+        // only part could be surface for volumes
+        if (!volume->is_model_part())
+            continue;
+
+        // is selected volume
+        if (mv.id() == volume->id())
+            continue;
+
+        result.push_back(volume);
+    }
+    return result;
+}
+
+void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines)
+{
+    if (mv.is_the_only_one_part())
+        return;
+
+    const std::optional<TextConfiguration> &tc_opt = mv.text_configuration;
+    if (!tc_opt.has_value())
+        return;
+    const TextConfiguration &tc = *tc_opt;
+
+    // calculate count lines when not set
+    if (count_lines == 0) {
+        count_lines = get_count_lines(tc.text);
+        if (count_lines == 0)
+            return;
+    }
+
+    // prepare volumes to slice
+    std::vector<ModelVolume *> volumes = prepare_volumes_to_slice(mv);
+    text_lines.init(volume_tr, volumes, style_manager, count_lines);
+}
+
+std::vector<ModelVolume *> missing_text_volumes_in_rebuild_order(const ModelObject &object)
+{
+    std::vector<ModelVolume *> ordered;
+    for (bool projected : {false, true})
+        for (ModelVolume *volume : object.volumes) {
+            // Same filter as the .3mf importer's KeepEmptyText. is_valid() asserts on text of other types.
+            if (!volume->is_missing_text_mesh())
+                continue;
+            if (projected == (volume->text_configuration->style.prop.per_glyph || volume->emboss_shape->projection.use_surface))
+                ordered.push_back(volume);
+        }
+    return ordered;
+}
+
+LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name)
+{
+    wxFont wx_font;
+    // load wxFont from same OS when font name is installed
+    if (style.type == WxFontUtils::get_current_type() && installed_name.has_value())
+        wx_font = WxFontUtils::load_wxFont(style.path);
+
+    // Flag that is selected same font
+    bool is_exact_font = true;
+    // Different OS or try found on same OS
+    if (!wx_font.IsOk()) {
+        is_exact_font = false;
+        // Try create similar wx font by FontFamily
+        wx_font = WxFontUtils::create_wxFont(style);
+        if (installed_name.has_value() && !installed_name->empty())
+            is_exact_font = wx_font.SetFaceName(*installed_name);
+
+        // Have to use some wxFont
+        if (!wx_font.IsOk())
+            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    }
+    assert(wx_font.IsOk());
+    return {wx_font, is_exact_font};
+}
+
+std::optional<wxString> get_installed_face_name(const std::optional<std::string>          &face_name_opt,
+                                                const std::function<bool(const wxString &)> &is_enumerated,
+                                                const std::vector<wxString>                 &bad,
+                                                bool                                         invalidate_cache)
+{
+    // Could exist OS without getter on face_name,
+    // but it is able to restore font from descriptor
+    // Soo default value must be TRUE
+    if (!face_name_opt.has_value())
+        return wxString();
+
+    wxString face_name = wxString::FromUTF8(face_name_opt->c_str());
+
+    // is font installed?
+    if (is_enumerated(face_name))
+        return face_name;
+
+    auto it_bad = std::lower_bound(bad.begin(), bad.end(), face_name);
+    if (it_bad == bad.end() || *it_bad != face_name) {
+        // check if wx allowed to set it up - another encoding of name
+        if (invalidate_cache)
+            wxFontEnumerator::InvalidateCache();
+        wxFont wx_font_;                                                                          // temporary structure
+        if (wx_font_.SetFaceName(face_name) && WxFontUtils::create_font_file(wx_font_) != nullptr // can load TTF file?
+        ) {
+            return wxString();
+            // QUESTION: add this name to allowed faces?
+            // Could create twin of font face name
+            // When not add it will be hard to select it again when change font
+        }
+    }
+    return {}; // not installed
+}
+
+namespace {
+// A hand-edited file can give a text a zero or non-finite size or depth. qhull crashes on non-finite vertices,
+// see the .3mf importer.
+bool is_finite(const TriangleMesh &mesh)
+{
+    return std::all_of(mesh.its.vertices.begin(), mesh.its.vertices.end(), [](const Vec3f &v) { return v.allFinite(); });
+}
+
+// Create mesh for embossed volume on the calling thread, without a job.
+// Must not throw (except bad_alloc): it runs while a project loads, and a failure there becomes a placeholder mesh.
+// Pushes onto result.flat_fallback when use_surface text could not be projected and was created flat.
+TriangleMesh create_mesh_blocking(DataBase &input, const ModelVolume &volume, const Transform3d &transform, RebuildTextsResult &result)
+{
+    auto was_canceled = []() { return false; };
+    try {
+        bool is_flat_fallback = false;
+        if (input.shape.projection.use_surface) {
+            // create_volume_sources() already returns no sources when this volume has no siblings to
+            // project onto, regardless of its own type; is_the_only_one_part() can't be used here since
+            // it only recognizes MODEL_PART, not the NEGATIVE_VOLUME/PARAMETER_MODIFIER texts this rebuild
+            // also handles, and would wrongly report those as an unprojectable flat fallback.
+            SurfaceVolumeData surface{transform, create_volume_sources(volume)};
+            if (!surface.sources.empty()) {
+                is_flat_fallback = true;
+                try {
+                    TriangleMesh mesh = ::cut_surface(input, surface, was_canceled);
+                    if (!mesh.empty() && is_finite(mesh))
+                        return mesh;
+                    if (!mesh.empty())
+                        BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\" cut from the surface has non-finite vertices";
+                } catch (const std::bad_alloc &) {
+                    throw;
+                } catch (const std::exception &e) {
+                    BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\": " << e.what();
+                }
+            }
+        }
+        TriangleMesh mesh = ::try_create_mesh(input, was_canceled);
+        if (!is_finite(mesh)) {
+            BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\" has non-finite vertices";
+            return {};
+        }
+        if (is_flat_fallback && !mesh.empty()) {
+            // No valid surface to cut from: the text is off the other parts, or they are texts not rebuilt yet (empty
+            // meshes are skipped, so the result depends on volume order), or the cut failed. Create flat text, but
+            // keep use_surface for later edits.
+            BOOST_LOG_TRIVIAL(warning) << "Text volume \"" << volume.name << "\" could not be projected onto a surface, created flat";
+            result.flat_fallback.push_back(volume.name);
+        }
+        return mesh;
+    } catch (const std::bad_alloc &) {
+        throw; // fatal, left to the app's handler
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "Can't create mesh for embossed volume \"" << volume.name << "\": " << e.what();
+        return {};
+    }
+}
+
+// Font of the texts of one rebuild with the same style type, path and font properties, loaded once for all of them
+struct LoadedFont
+{
+    // Only loads fonts by style: no AppConfig, ImGui font or default styles are needed.
+    StyleManager style_manager{nullptr, {}};
+    bool         is_loaded = false;
+    bool         is_exact  = true;
+};
+using LoadedFonts = std::map<std::tuple<EmbossStyle::Type, std::string, std::optional<std::string>, std::optional<std::string>,
+                                        std::optional<std::string>, std::optional<std::string>>,
+                             LoadedFont>;
+
+// Path of the font bundled with Orca with the file name of a file_path style's path. Only bundled fonts are opened
+// on load: the path comes from the project, and opening any path it names would e.g. reach out to a network share.
+std::optional<std::string> get_bundled_font_path(const std::string &path)
+{
+    // Without separators, the name can't leave the fonts directory; ".." or "" names a directory.
+    const std::string name = path.substr(path.find_last_of("/\\") + 1);
+    // The fonts directory also holds e.g. the license text, which is no font.
+    if (!boost::algorithm::iends_with(name, ".ttf") && !boost::algorithm::iends_with(name, ".otf") &&
+        !boost::algorithm::iends_with(name, ".ttc"))
+        return {};
+    const std::string bundled = resources_dir() + "/fonts/" + name;
+    boost::system::error_code ec;
+    if (boost::filesystem::is_regular_file(boost::filesystem::path(bundled), ec))
+        return bundled;
+    return {};
+}
+
+void load_font(LoadedFont &font, const StyleManager::Style &style)
+{
+    StyleManager &style_manager = font.style_manager;
+    if (style.type == EmbossStyle::Type::file_path)
+        if (std::optional<std::string> path = get_bundled_font_path(style.path); path.has_value()) {
+            StyleManager::Style bundled_style = style;
+            bundled_style.path                = *path;
+            font.is_loaded                    = style_manager.load_style(bundled_style);
+        }
+    if (font.is_loaded)
+        return;
+    // Same fallback as the gizmo, e.g. for a font from another OS, a font file that is gone or not bundled.
+    // wx's face name cache is invalidated once per rebuild, see rebuild_missing_text_meshes().
+    const LoadedWxFont wx_font = load_wx_font(style, get_installed_face_name(style.prop.face_name, wxFontEnumerator::IsValidFacename, {}, false));
+    font.is_exact  = wx_font.is_exact;
+    font.is_loaded = style_manager.load_style(style, wx_font.font);
+    if (font.is_loaded)
+        return;
+    // No TTF for that font, e.g. a broken font file (the gizmo lists such faces as "bad"): try a font of the
+    // style's family, then the GUI font, skipping any already tried.
+    font.is_exact = false;
+    std::vector<wxFont> tried{wx_font.font};
+    for (const wxFont &fallback : {load_wx_font(style, {}).font, wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT)}) {
+        if (std::find(tried.begin(), tried.end(), fallback) != tried.end())
+            continue;
+        if (font.is_loaded = style_manager.load_style(style, fallback); font.is_loaded)
+            return;
+        tried.push_back(fallback);
+    }
+}
+
+/// <summary>
+/// Create text mesh from the volume's text configuration on the calling thread.
+/// Volume must have text configuration and emboss shape. A text that can't be created gets a placeholder mesh.
+/// </summary>
+/// <param name="fonts">Fonts loaded for the previous volumes, reused for texts in the same font</param>
+/// <param name="result">Volume name is pushed onto placeholder, similar_font or flat_fallback as applicable</param>
+void rebuild_text_mesh(ModelVolume &text_volume, LoadedFonts &fonts, RebuildTextsResult &result)
+{
+    assert(text_volume.text_configuration.has_value() && text_volume.emboss_shape.has_value());
+    const Transform3d &tr = text_volume.get_matrix(); // the text frame, see the .3mf importer
+
+    TriangleMesh mesh;
+    bool is_exact = true;
+    // Must not throw: this runs while a project loads, and a failure here becomes a placeholder
+    // mesh instead of aborting the whole load (see create_mesh_blocking's own contract above).
+    try {
+        const TextConfiguration &tc = *text_volume.text_configuration;
+        const EmbossShape       &es = *text_volume.emboss_shape;
+
+        const StyleManager::Style style{tc.style, es.projection};
+        const FontProp &fp = style.prop;
+        auto [it, is_new] = fonts.try_emplace({style.type, style.path, fp.face_name, fp.family, fp.style, fp.weight});
+        LoadedFont   &font          = it->second;
+        StyleManager &style_manager = font.style_manager;
+        if (is_new)
+            load_font(font, style);
+        else if (font.is_loaded) {
+            // Text lines use the volume's font properties, set as load_style() does. Glyphs depend on them too.
+            FontProp  &prop        = style_manager.get_font_prop();
+            const bool same_glyphs = prop.size_in_mm == fp.size_in_mm && prop.char_gap == fp.char_gap &&
+                                     prop.boldness == fp.boldness && prop.skew == fp.skew &&
+                                     prop.collection_number == fp.collection_number;
+            prop = fp;
+            if (const wxFont &wx_font = style_manager.get_wx_font(); wx_font.IsOk())
+                WxFontUtils::update_property(prop, wx_font);
+            // The cached glyphs depend on these properties, see Emboss::get_glyph().
+            if (!same_glyphs)
+                style_manager.clear_glyphs_cache();
+        }
+        is_exact = font.is_exact;
+        if (font.is_loaded) {
+            const std::optional<unsigned int> collection_number = tc.style.prop.collection_number;
+            TextConfiguration text_config = tc;
+            // A face the loaded font doesn't have, e.g. of a font collection substituted by a single-face font
+            const std::optional<unsigned int> &collection = text_config.style.prop.collection_number;
+            if (collection.value_or(0) >= style_manager.get_font_file_with_cache().font_file->infos.size()) {
+                text_config.style.prop.collection_number.reset();
+                style_manager.get_font_prop().collection_number.reset();
+                is_exact = false;
+            }
+            DataBase base(text_volume.name, std::make_shared<std::atomic<bool>>(false));
+            base.is_outside = text_volume.type() == ModelVolumeType::MODEL_PART;
+            // from_surface stays unset: the distance from the surface is not stored, the gizmo raycasts the scene for it.
+            if (tc.style.prop.per_glyph) {
+                TextLinesModel text_lines;
+                init_volume_text_lines(text_lines, text_volume, tr, style_manager);
+                base.text_lines = text_lines.get_lines();
+            }
+            TextDataBase data(std::move(base), style_manager.get_font_file_with_cache(), std::move(text_config), es.projection);
+            mesh = create_mesh_blocking(data, text_volume, tr, result);
+            if (!mesh.empty()) {
+                data.write(text_volume);
+                // The face is substituted for this mesh only; keep the stored one for when the font is installed.
+                text_volume.text_configuration->style.prop.collection_number = collection_number;
+            }
+        } else
+            BOOST_LOG_TRIVIAL(warning) << "Can't load font for text volume \"" << text_volume.name << "\"";
+    } catch (const std::bad_alloc &) {
+        throw; // fatal, left to the app's handler
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "Can't rebuild text volume \"" << text_volume.name << "\": " << e.what();
+        mesh = {};
+    }
+
+    const bool is_rebuilt = !mesh.empty();
+    if (!is_rebuilt) {
+        // Same placeholder as the gizmo uses when text has no shape
+        mesh = ::create_default_mesh();
+        result.placeholder.push_back(text_volume.name);
+    } else if (!is_exact)
+        result.similar_font.push_back(text_volume.name);
+    text_volume.set_mesh(std::move(mesh));
+    text_volume.calculate_convex_hull();
+}
+} // namespace
+
+RebuildTextsResult rebuild_missing_text_meshes(Model &model, const std::function<bool()> &was_canceled)
+{
+    LoadedFonts        fonts;
+    RebuildTextsResult result;
+    for (ModelObject *object : model.objects) {
+        const std::vector<ModelVolume *> volumes = missing_text_volumes_in_rebuild_order(*object);
+        if (volumes.empty())
+            continue;
+        if (fonts.empty())
+            // Fonts may have been installed since wx cached the face names; enumerated again on first use.
+            wxFontEnumerator::InvalidateCache();
+        for (ModelVolume *volume : volumes) {
+            if (was_canceled && was_canceled())
+                return result;
+            rebuild_text_mesh(*volume, fonts, result);
+        }
+        object->invalidate_bounding_box();
+    }
+
+    // The slicing core assumes every volume has a mesh. A failed rebuild gets a placeholder, so none should be
+    // left empty; should one be, remove it, and its object if that leaves it without volumes. Backwards, so the
+    // indices still to visit stay valid. Plater::load_files() takes object indices only after this.
+    for (size_t object_idx = model.objects.size(); object_idx-- > 0;) {
+        ModelObject *object      = model.objects[object_idx];
+        const bool   had_volumes = !object->volumes.empty();
+        for (size_t volume_idx = object->volumes.size(); volume_idx-- > 0;) {
+            const ModelVolume *volume = object->volumes[volume_idx];
+            if (!volume->mesh().empty())
+                continue;
+            BOOST_LOG_TRIVIAL(warning) << "Removing volume \"" << volume->name << "\" without a mesh";
+            result.removed.push_back(volume->name);
+            object->delete_volume(volume_idx);
+        }
+        if (object->volumes.empty()) {
+            // The importer left the object without any part, e.g. all its meshes were stripped: name the object.
+            if (!had_volumes) {
+                BOOST_LOG_TRIVIAL(warning) << "Removing object \"" << object->name << "\" without volumes";
+                result.removed.push_back(object->name);
+            }
+            model.delete_object(object_idx);
+        }
+    }
+    return result;
+}
+
+void RebuildTextsResult::append(const RebuildTextsResult &other)
+{
+    placeholder.insert(placeholder.end(), other.placeholder.begin(), other.placeholder.end());
+    similar_font.insert(similar_font.end(), other.similar_font.begin(), other.similar_font.end());
+    flat_fallback.insert(flat_fallback.end(), other.flat_fallback.begin(), other.flat_fallback.end());
+    removed.insert(removed.end(), other.removed.begin(), other.removed.end());
+}
+
+std::string RebuildTextsResult::warning_text() const
+{
+    std::string message;
+    auto append_section = [&message](const std::vector<std::string> &names, const std::string &header) {
+        if (names.empty())
+            return;
+        if (!message.empty())
+            message += "\n";
+        message += header;
+        for (const std::string &name : names)
+            message += "\n- " + name;
+    };
+    append_section(placeholder, _u8L("Some text parts could not be created from their text and font. A placeholder is used instead:"));
+    append_section(similar_font, _u8L("The font of some text parts is not available. Until you install it and reopen the project, a similar font is used for:"));
+    append_section(flat_fallback, _u8L("Some text parts could not be projected onto the surface. They are flat until re-embossed:"));
+    append_section(removed, _u8L("Some parts have no geometry and could not be rebuilt. They are removed:"));
+    return message;
+}
+
+TextDataBase::TextDataBase(DataBase               &&parent,
+                           const FontFileWithCache &font_file,
+                           TextConfiguration      &&text_configuration,
+                           const EmbossProjection  &projection)
+    : DataBase(std::move(parent)), m_font_file(font_file) /* copy */, m_text_configuration(std::move(text_configuration))
+{
+    assert(m_font_file.has_value());
+    shape.projection = projection; // copy
+
+    const FontProp &fp = m_text_configuration.style.prop;
+    const FontFile &ff = *m_font_file.font_file;
+    shape.scale = get_text_shape_scale(fp, ff);
+}
+
+EmbossShape &TextDataBase::create_shape()
+{
+    if (!shape.shapes_with_ids.empty())
+        return shape;
+
+    // create shape by configuration
+    const char *text = m_text_configuration.text.c_str();
+    std::wstring text_w = boost::nowide::widen(text);
+    const FontProp &fp = m_text_configuration.style.prop;
+    auto was_canceled = [&c = cancel](){ return c->load(); };
+
+    shape.shapes_with_ids = text2vshapes(m_font_file, text_w, fp, was_canceled);
+    return shape;
+}
+
+void TextDataBase::write(ModelVolume &volume) const
+{
+    DataBase::write(volume);
+    volume.text_configuration = m_text_configuration; // copy
+    assert(volume.emboss_shape.has_value());
 }
 
 } // namespace Slic3r::GUI::Emboss

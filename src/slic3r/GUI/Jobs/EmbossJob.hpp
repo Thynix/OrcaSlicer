@@ -3,14 +3,18 @@
 
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include "slic3r/GUI/3DScene.hpp"
 #include <string>
+#include <wx/string.h>
+#include <wx/font.h>
 #include <libslic3r/Emboss.hpp>
 #include <libslic3r/EmbossShape.hpp> // ExPolygonsWithIds
 #include <utility>
 #include <vector>
+#include <libslic3r/TextConfiguration.hpp>
 #include "libslic3r/Point.hpp" // Transform3d
 #include "libslic3r/ObjectID.hpp"
 
@@ -23,6 +27,8 @@
 namespace Slic3r {
 class TriangleMesh;
 class ModelVolume;
+class Model;
+class ModelObject;
 enum class ModelVolumeType : int;
 class BuildVolume;
 namespace GUI {
@@ -34,6 +40,7 @@ class Selection;
 }}
 
 namespace Slic3r::GUI::Emboss {
+class StyleManager;
 
 /// <summary>
 /// Base data hold data for create emboss shape
@@ -84,6 +91,24 @@ public:
 
     // shape to emboss
     EmbossShape shape;
+};
+
+/// <summary>
+/// Text volume data: shape is created from text and font
+/// </summary>
+struct TextDataBase : public DataBase
+{
+    TextDataBase(DataBase &&parent, const Slic3r::Emboss::FontFileWithCache &font_file,
+        TextConfiguration &&text_configuration, const EmbossProjection& projection);
+    // Create shape from text + font configuration
+    EmbossShape &create_shape() override;
+    void write(ModelVolume &volume) const override;
+
+private:
+    //  Keep pointer on Data of font (glyph shapes)
+    Slic3r::Emboss::FontFileWithCache m_font_file;
+    // font item is not used for create object
+    TextConfiguration m_text_configuration;
 };
 
 /// <summary>
@@ -198,6 +223,76 @@ public:
 /// <param name="volume">Define embossed volume</param>
 /// <returns>Source data for cut surface from</returns>
 SurfaceVolumeData::ModelSources create_volume_sources(const ModelVolume &volume);
+
+/// <summary>
+/// Volumes of the object which the text volume can be projected onto: its other model parts
+/// </summary>
+std::vector<ModelVolume *> prepare_volumes_to_slice(const ModelVolume &mv);
+
+/// <summary>
+/// Init lines of per glyph text for volume with transformation inside of its object, which need not be in the scene
+/// </summary>
+/// <param name="count_lines">Count of text lines, calculated from the text when zero</param>
+void init_volume_text_lines(TextLinesModel &text_lines, const ModelVolume &mv, const Transform3d &volume_tr, StyleManager &style_manager, unsigned count_lines = 0);
+
+struct LoadedWxFont
+{
+    wxFont font;
+    // false when a similar font is used instead of the stored one
+    bool is_exact;
+};
+/// <summary>
+/// wxFont of the style on this OS, or a similar one when the style comes from another OS or its font is not installed
+/// </summary>
+/// <param name="installed_name">Face name of the style when it is installed, see get_installed_face_name()</param>
+LoadedWxFont load_wx_font(const EmbossStyle &style, const std::optional<wxString> &installed_name);
+
+/// <summary>
+/// Check installed fonts whether optional face name exist in installed fonts
+/// </summary>
+/// <param name="face_name_opt">Name from style - style.prop.face_name</param>
+/// <param name="is_enumerated">Whether the name is among the face names enumerated on this OS</param>
+/// <param name="bad">Sorted enumerated face names whose font can't be loaded</param>
+/// <param name="invalidate_cache">Invalidate wx's face name cache before trying a name which is not enumerated.
+/// Pass false when the caller has just invalidated it, as each invalidation makes wx enumerate all fonts again.</param>
+/// <returns>When it could be installed it contain value(potentionaly empty string)</returns>
+std::optional<wxString> get_installed_face_name(const std::optional<std::string>          &face_name_opt,
+                                                const std::function<bool(const wxString &)> &is_enumerated,
+                                                const std::vector<wxString>                 &bad              = {},
+                                                bool                                         invalidate_cache = true);
+
+/// <summary>
+/// Names of volumes which could not be rebuilt exactly or were removed, see rebuild_missing_text_meshes()
+/// </summary>
+struct RebuildTextsResult
+{
+    // Can't create the text from its font, a placeholder mesh is used
+    std::vector<std::string> placeholder;
+    // Rebuilt with a similar font, because the stored one can't be loaded
+    std::vector<std::string> similar_font;
+    // Use-surface text that can't be projected onto a surface is created flat, use_surface is kept
+    std::vector<std::string> flat_fallback;
+    // Still without a mesh after the rebuild, removed from the model with any object left without volumes
+    std::vector<std::string> removed;
+
+    // Add the names of another rebuild, e.g. of the next file loaded together
+    void append(const RebuildTextsResult &other);
+    // Message for the user, empty when there is nothing to warn about
+    std::string warning_text() const;
+};
+
+/// <summary>
+/// Text volumes of the object without a mesh: flat ones first, since projected ones need the other parts' meshes.
+/// </summary>
+std::vector<ModelVolume *> missing_text_volumes_in_rebuild_order(const ModelObject &object);
+
+/// <summary>
+/// Rebuild, on the calling thread, the mesh of every text volume that has none, e.g. one loaded from .3mf with
+/// LoadStrategy::KeepEmptyText. See docs/HLSD/3mf-text-parts.md.
+/// </summary>
+/// <param name="was_canceled">Called before each text. When it returns true, the rebuild stops and leaves the
+/// model partly rebuilt, with volumes still without a mesh, for the caller to discard.</param>
+RebuildTextsResult rebuild_missing_text_meshes(Model &model, const std::function<bool()> &was_canceled = {});
 
 /// <summary>
 /// shorten params for start_crate_volume functions
